@@ -489,14 +489,14 @@ function call_google_gemini(string $prompt, array $history, ?array $studentData,
 }
 
 // -------------------------------------------------------------
-// Execution Flow: Try Gemini -> Try OpenAI -> Try Anthropic -> Fallback Engine
+// Execution Flow: Try OpenAI GPT -> Try Gemini -> Try Anthropic -> Fallback Engine
 // -------------------------------------------------------------
 $promptText = $q ?: $topic;
 
-$aiResponse = call_google_gemini($promptText, $messagesHistory, $studentData, $action);
+$aiResponse = call_openai_gpt($promptText, $messagesHistory, $studentData, $action);
 
 if (!$aiResponse) {
-    $aiResponse = call_openai_gpt($promptText, $messagesHistory, $studentData, $action);
+    $aiResponse = call_google_gemini($promptText, $messagesHistory, $studentData, $action);
 }
 
 if (!$aiResponse) {

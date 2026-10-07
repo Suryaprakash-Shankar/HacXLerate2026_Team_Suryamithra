@@ -2,4 +2,5 @@
 .DS_Store
 Thumbs.db
 config/gemini_key.txt
+config/openai_key.txt
 .env

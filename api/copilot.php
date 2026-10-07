@@ -14,6 +14,26 @@ function llm_answer(string $q, array $S): ?string {
     $rows = array_map(fn($s) => [$s['student_code'], $s['name'], $s['department'], $s['score'], $s['risk']['overall'], $s['segment'], $s['c'], $s['explain'][0]['label']], $S);
     $prompt = "You are SURYAMITHRA Copilot for college faculty. Answer only from the student data given. Be concise, name students by ID, and suggest an action. Data rows: [id,name,dept,score,risk,segment,indicators,top_driver]. Score weights: academic30 attendance15 lms10 engagement10 placement20 skills10 feedback5.\n\nDATA:\n" . json_encode($rows) . "\n\nQUESTION: " . $q;
 
+    // 1. Try OpenAI GPT
+    if (defined('OPENAI_API_KEY') && OPENAI_API_KEY && function_exists('curl_init')) {
+        $ch = curl_init('https://api.openai.com/v1/chat/completions');
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true, CURLOPT_POST => true, CURLOPT_TIMEOUT => 25,
+            CURLOPT_HTTPHEADER => ['Content-Type: application/json', 'Authorization: Bearer ' . OPENAI_API_KEY],
+            CURLOPT_POSTFIELDS => json_encode([
+                'model' => defined('OPENAI_MODEL') ? OPENAI_MODEL : 'gpt-4o-mini',
+                'messages' => [['role' => 'system', 'content' => 'You are SURYAMITHRA Copilot for college faculty.'], ['role' => 'user', 'content' => $prompt]]
+            ])
+        ]);
+        $res = curl_exec($ch); $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE); curl_close($ch);
+        if ($httpCode === 200 && $res) {
+            $j = json_decode($res, true);
+            $t = $j['choices'][0]['message']['content'] ?? null;
+            if ($t) return nl2br(e($t));
+        }
+    }
+
+    // 2. Try Gemini
     if (defined('GEMINI_API_KEY') && GEMINI_API_KEY && function_exists('curl_init')) {
         $models = ['gemma-4-26b-a4b-it', 'gemini-3.8-flash', 'gemini-3.5-flash', 'gemini-flash-latest'];
         foreach ($models as $m) {
@@ -33,6 +53,7 @@ function llm_answer(string $q, array $S): ?string {
         }
     }
 
+    // 3. Try Anthropic
     if (defined('LLM_API_KEY') && LLM_API_KEY && function_exists('curl_init')) {
         $payload = ['model' => LLM_MODEL, 'max_tokens' => 700,
             'system' => 'You are SURYAMITHRA Copilot for college faculty. Answer only from the student data given. Be concise, name students by ID, and suggest an action. Data rows: [id,name,dept,score,risk,segment,indicators,top_driver]. Score weights: academic30 attendance15 lms10 engagement10 placement20 skills10 feedback5.',
