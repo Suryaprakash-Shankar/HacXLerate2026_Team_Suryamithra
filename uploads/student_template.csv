@@ -1,0 +1,4 @@
+student_code,name,email,department,semester,cgpa,backlogs,internal_avg,attendance,login_freq,assignment_completion,events,clubs,hackathons,certifications,aptitude,coding,mock_interview,resume,applications,target_role,satisfaction,faculty_rating,skill_Java,skill_SQL,skill_Spring Boot,skill_REST API,skill_Git,skill_Docker,skill_Python,skill_Excel,skill_Statistics,skill_Power BI,skill_Communication,skill_JavaScript,skill_React,skill_Node.js,skill_Linux,skill_AWS
+ST2001,Asha Menon,asha.menon@campusiq.local,CSE,5,8.6,0,84,92,22,95,6,2,2,3,82,85,78,84,4,Java Backend Developer,4.5,4.6,78,72,70,68,75,60,55,60,50,45,72,55,50,48,58,45
+ST2002,Rohit Verma,rohit.verma@campusiq.local,IT,5,6.9,1,58,64,9,52,1,0,0,1,52,48,45,55,1,Data Analyst,3.2,3.4,40,55,30,35,45,25,50,58,48,40,52,30,28,25,35,22
+ST2003,Isha Pillai,isha.pillai@campusiq.local,AI & DS,3,8.9,0,88,94,24,98,5,3,1,4,48,40,45,55,0,Full Stack Developer,4.4,4.5,50,66,42,60,70,35,62,70,64,58,76,66,60,52,40,30
