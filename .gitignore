@@ -1,3 +1,5 @@
 *.zip
 .DS_Store
 Thumbs.db
+config/gemini_key.txt
+.env

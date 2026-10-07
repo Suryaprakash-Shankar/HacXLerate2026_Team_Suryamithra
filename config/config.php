@@ -31,7 +31,12 @@ define('FIREBASE_STORAGE_BUCKET', 'suryamithra.firebasestorage.app');
 define('FIREBASE_MESSAGING_SENDER_ID', '562733026375');
 define('FIREBASE_APP_ID', '1:562733026375:web:bbec64d6c9d6701eb87562');
 
-// Optional: OpenAI API Key (e.g. gpt-4o, gpt-4o-mini) or Anthropic LLM key
+// Google Gemini AI Studio API Key Configuration (Read from ENV or local key file)
+$__geminiKeyFile = __DIR__ . '/gemini_key.txt';
+define('GEMINI_API_KEY', getenv('GEMINI_API_KEY') ?: (file_exists($__geminiKeyFile) ? trim(file_get_contents($__geminiKeyFile)) : ''));
+define('GEMINI_MODEL', 'gemini-1.5-flash');
+
+// Optional: OpenAI API Key or Anthropic LLM key
 define('OPENAI_API_KEY', getenv('OPENAI_API_KEY') ?: '');
 define('OPENAI_MODEL', 'gpt-4o-mini');
 define('LLM_API_KEY', getenv('LLM_API_KEY') ?: '');

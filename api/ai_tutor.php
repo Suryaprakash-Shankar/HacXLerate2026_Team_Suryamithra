@@ -409,11 +409,95 @@ EOT;
 }
 
 // -------------------------------------------------------------
-// Execution Flow: Try OpenAI -> Try Anthropic -> Fallback Engine
+// 0. Google Gemini API Integration (AI Studio Key)
+// -------------------------------------------------------------
+if (!function_exists('call_google_gemini')) {
+function call_google_gemini(string $prompt, array $history, ?array $studentData, string $action): ?string {
+    if (!defined('GEMINI_API_KEY') || !GEMINI_API_KEY || !function_exists('curl_init')) {
+        return null;
+    }
+
+    $apiKey = GEMINI_API_KEY;
+    $models = ['gemma-4-26b-a4b-it', 'gemini-3.8-flash', 'gemini-3.5-flash', 'gemini-flash-latest'];
+
+    $systemContext = "You are SURYAMITHRA AI Learning Copilot, powered by Google Gemini. "
+        . "You are an expert university AI tutor and placement coach. "
+        . "Provide clear, step-by-step explanations, working code examples (Java, Python, C++, SQL), real-world analogies, and interview tips. "
+        . "Format responses cleanly using Markdown.";
+
+    if ($studentData) {
+        $systemContext .= " Student context: Name: {$studentData['name']}, Dept: {$studentData['department']}, Semester: {$studentData['semester']}.";
+        if (!empty($studentData['gaps'])) {
+            $gList = array_map(fn($g) => $g['skill'] . " (gap: {$g['gap']})", array_slice($studentData['gaps'], 0, 3));
+            $systemContext .= " Skill Gaps: " . implode(', ', $gList) . ".";
+        }
+    }
+
+    $contents = [];
+    foreach ($history as $h) {
+        if (!empty($h['role']) && !empty($h['content'])) {
+            $contents[] = [
+                'role' => $h['role'] === 'user' ? 'user' : 'model',
+                'parts' => [['text' => (string)$h['content']]]
+            ];
+        }
+    }
+
+    if (empty($contents)) {
+        $contents[] = [
+            'role' => 'user',
+            'parts' => [['text' => $systemContext . "\n\nUser Question: " . $prompt]]
+        ];
+    } else {
+        $contents[] = [
+            'role' => 'user',
+            'parts' => [['text' => $prompt]]
+        ];
+    }
+
+    $payload = [
+        'contents' => $contents
+    ];
+
+    foreach ($models as $model) {
+        $url = "https://generativelanguage.googleapis.com/v1beta/models/{$model}:generateContent?key={$apiKey}";
+
+        $ch = curl_init($url);
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_POST => true,
+            CURLOPT_TIMEOUT => 25,
+            CURLOPT_HTTPHEADER => ['Content-Type: application/json'],
+            CURLOPT_POSTFIELDS => json_encode($payload)
+        ]);
+
+        $res = curl_exec($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+
+        if ($httpCode === 200 && $res) {
+            $j = json_decode($res, true);
+            $text = $j['candidates'][0]['content']['parts'][0]['text'] ?? null;
+            if ($text) {
+                return $text;
+            }
+        }
+    }
+
+    return null;
+}
+}
+
+// -------------------------------------------------------------
+// Execution Flow: Try Gemini -> Try OpenAI -> Try Anthropic -> Fallback Engine
 // -------------------------------------------------------------
 $promptText = $q ?: $topic;
 
-$aiResponse = call_openai_gpt($promptText, $messagesHistory, $studentData, $action);
+$aiResponse = call_google_gemini($promptText, $messagesHistory, $studentData, $action);
+
+if (!$aiResponse) {
+    $aiResponse = call_openai_gpt($promptText, $messagesHistory, $studentData, $action);
+}
 
 if (!$aiResponse) {
     $aiResponse = call_anthropic_claude($promptText, $messagesHistory, $studentData);

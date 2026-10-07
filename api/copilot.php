@@ -11,18 +11,42 @@ function link_s(array $s): string { return '<a href="' . url('student.php?id=' .
 
 // Optional LLM answer, grounded in a compact data summary
 function llm_answer(string $q, array $S): ?string {
-    if (!LLM_API_KEY || !function_exists('curl_init')) return null;
     $rows = array_map(fn($s) => [$s['student_code'], $s['name'], $s['department'], $s['score'], $s['risk']['overall'], $s['segment'], $s['c'], $s['explain'][0]['label']], $S);
-    $payload = ['model' => LLM_MODEL, 'max_tokens' => 700,
-        'system' => 'You are SURYAMITHRA Copilot for college faculty. Answer only from the student data given. Be concise, name students by ID, and suggest an action. Data rows: [id,name,dept,score,risk,segment,indicators,top_driver]. Score weights: academic30 attendance15 lms10 engagement10 placement20 skills10 feedback5.',
-        'messages' => [['role' => 'user', 'content' => "DATA:\n" . json_encode($rows) . "\n\nQUESTION: " . $q]]];
-    $ch = curl_init('https://api.anthropic.com/v1/messages');
-    curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER => true, CURLOPT_POST => true, CURLOPT_TIMEOUT => 25,
-        CURLOPT_HTTPHEADER => ['Content-Type: application/json', 'x-api-key: ' . LLM_API_KEY, 'anthropic-version: 2023-06-01'], CURLOPT_POSTFIELDS => json_encode($payload)]);
-    $res = curl_exec($ch); curl_close($ch);
-    $j = $res ? json_decode($res, true) : null;
-    $t = $j['content'][0]['text'] ?? null;
-    return $t ? nl2br(e($t)) : null;
+    $prompt = "You are SURYAMITHRA Copilot for college faculty. Answer only from the student data given. Be concise, name students by ID, and suggest an action. Data rows: [id,name,dept,score,risk,segment,indicators,top_driver]. Score weights: academic30 attendance15 lms10 engagement10 placement20 skills10 feedback5.\n\nDATA:\n" . json_encode($rows) . "\n\nQUESTION: " . $q;
+
+    if (defined('GEMINI_API_KEY') && GEMINI_API_KEY && function_exists('curl_init')) {
+        $models = ['gemma-4-26b-a4b-it', 'gemini-3.8-flash', 'gemini-3.5-flash', 'gemini-flash-latest'];
+        foreach ($models as $m) {
+            $url = "https://generativelanguage.googleapis.com/v1beta/models/{$m}:generateContent?key=" . GEMINI_API_KEY;
+            $ch = curl_init($url);
+            curl_setopt_array($ch, [
+                CURLOPT_RETURNTRANSFER => true, CURLOPT_POST => true, CURLOPT_TIMEOUT => 25,
+                CURLOPT_HTTPHEADER => ['Content-Type: application/json'],
+                CURLOPT_POSTFIELDS => json_encode(['contents' => [['parts' => [['text' => $prompt]]]]])
+            ]);
+            $res = curl_exec($ch); $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE); curl_close($ch);
+            if ($httpCode === 200 && $res) {
+                $j = json_decode($res, true);
+                $t = $j['candidates'][0]['content']['parts'][0]['text'] ?? null;
+                if ($t) return nl2br(e($t));
+            }
+        }
+    }
+
+    if (defined('LLM_API_KEY') && LLM_API_KEY && function_exists('curl_init')) {
+        $payload = ['model' => LLM_MODEL, 'max_tokens' => 700,
+            'system' => 'You are SURYAMITHRA Copilot for college faculty. Answer only from the student data given. Be concise, name students by ID, and suggest an action. Data rows: [id,name,dept,score,risk,segment,indicators,top_driver]. Score weights: academic30 attendance15 lms10 engagement10 placement20 skills10 feedback5.',
+            'messages' => [['role' => 'user', 'content' => "DATA:\n" . json_encode($rows) . "\n\nQUESTION: " . $q]]];
+        $ch = curl_init('https://api.anthropic.com/v1/messages');
+        curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER => true, CURLOPT_POST => true, CURLOPT_TIMEOUT => 25,
+            CURLOPT_HTTPHEADER => ['Content-Type: application/json', 'x-api-key: ' . LLM_API_KEY, 'anthropic-version: 2023-06-01'], CURLOPT_POSTFIELDS => json_encode($payload)]);
+        $res = curl_exec($ch); curl_close($ch);
+        $j = $res ? json_decode($res, true) : null;
+        $t = $j['content'][0]['text'] ?? null;
+        if ($t) return nl2br(e($t));
+    }
+
+    return null;
 }
 
 $ql = strtolower($q);
