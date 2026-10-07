@@ -39,10 +39,16 @@ define('OPENAI_MODEL', 'gpt-4o-mini');
 // Google Gemini AI Studio API Key Configuration (Read from ENV or local key file)
 $__geminiKeyFile = __DIR__ . '/gemini_key.txt';
 define('GEMINI_API_KEY', getenv('GEMINI_API_KEY') ?: (file_exists($__geminiKeyFile) ? trim(file_get_contents($__geminiKeyFile)) : ''));
-define('GEMINI_MODEL', 'gemini-1.5-flash');
+// Leave empty to auto-detect the newest available Gemini Flash model for your key.
+define('GEMINI_MODEL', '');
 
 define('LLM_API_KEY', getenv('LLM_API_KEY') ?: '');
-define('LLM_MODEL', 'claude-3-5-sonnet-20241022');
+define('LLM_MODEL', 'claude-sonnet-5-5');
+
+// AI Tutor: which providers to try, in order (a provider without a key is skipped)
+define('AI_PROVIDER_ORDER', 'gemini,openai,anthropic');
+// Set to true while testing: the tutor API then returns the real provider errors in a 'debug' field
+define('AI_DEBUG', false);
 
 // Auto-detect the URL base (works for http://localhost/campusiq or any folder name)
 $__root = str_replace('\\', '/', realpath(__DIR__ . '/..'));

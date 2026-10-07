@@ -1,27 +1,50 @@
 <?php
 require_once __DIR__ . '/../includes/functions.php';
-header('Content-Type: application/json');
+require_once __DIR__ . '/../includes/ai_client.php';
+require_once __DIR__ . '/../includes/ai_fallback.php';
 
+// Never let PHP warnings/HTML leak into the JSON response.
+ini_set('display_errors', '0');
+@set_time_limit(100);
+ob_start();
+
+function tutor_respond(array $data, int $code = 200): void
+{
+    while (ob_get_level() > 0) ob_end_clean();
+    http_response_code($code);
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode($data, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+    exit;
+}
+
+set_exception_handler(function (Throwable $t) {
+    error_log('[ai_tutor] ' . $t->getMessage() . ' @ ' . $t->getFile() . ':' . $t->getLine());
+    tutor_respond(['error' => 'The tutor hit an unexpected error. Please try again.'], 500);
+});
+
+// ---------------------------------------------------------------- auth + csrf
 $u = current_user();
-if (!$u) {
-    http_response_code(401);
-    echo json_encode(['error' => 'Please log in to use AI Tutor.']);
-    exit;
-}
-
+if (!$u) tutor_respond(['error' => 'Please log in to use AI Tutor.'], 401);
 if (!hash_equals($_SESSION['csrf'] ?? '', $_POST['csrf'] ?? '')) {
-    http_response_code(400);
-    echo json_encode(['error' => 'Session expired. Reload the page.']);
-    exit;
+    tutor_respond(['error' => 'Session expired. Reload the page.'], 400);
 }
 
-$action = trim($_POST['action'] ?? 'chat');
-$topic  = trim($_POST['topic'] ?? '');
-$q      = trim($_POST['q'] ?? '');
-$messagesJson = $_POST['messages'] ?? '[]';
-$messagesHistory = json_decode($messagesJson, true) ?: [];
+// light rate limit (protects your API quota): 12 requests / minute / session
+$now = time();
+$hits = array_values(array_filter($_SESSION['ai_hits'] ?? [], fn($t) => $t > $now - 60));
+if (count($hits) >= 12) tutor_respond(['error' => 'Too many questions too fast. Wait a few seconds and try again.'], 429);
+$hits[] = $now;
+$_SESSION['ai_hits'] = $hits;
 
-// Fetch student profile context if applicable
+// ---------------------------------------------------------------------- input
+$action = in_array($_POST['action'] ?? 'chat', ['chat', 'explain', 'quiz', 'prep'], true) ? $_POST['action'] : 'chat';
+$topic  = trim((string)($_POST['topic'] ?? ''));
+$q      = trim((string)($_POST['q'] ?? ''));
+$prompt = mb_substr($q !== '' ? $q : $topic, 0, 4000);
+if ($prompt === '') tutor_respond(['error' => 'Please type a question.'], 400);
+$history = json_decode((string)($_POST['messages'] ?? '[]'), true);
+$history = is_array($history) ? $history : [];
+
 $studentData = null;
 if ($u['role'] === 'student') {
     $studentData = student_by_user((int)$u['id']);
@@ -29,495 +52,117 @@ if ($u['role'] === 'student') {
     $r = load_students((int)$_POST['student_id']);
     $studentData = $r[0] ?? null;
 }
+session_write_close(); // don't hold the session lock during the (slow) AI call
 
-// -------------------------------------------------------------
-// 1. OpenAI API Integration (GPT-4o / GPT-4o-mini)
-// -------------------------------------------------------------
-if (!function_exists('call_openai_gpt')) {
-function call_openai_gpt(string $prompt, array $history, ?array $studentData, string $action): ?string {
-    if (!defined('OPENAI_API_KEY') || !OPENAI_API_KEY || !function_exists('curl_init')) {
-        return null;
-    }
+// -------------------------------------------------------------- system prompts
+function tutor_system_prompt(string $action, ?array $s, array $u): string
+{
+    $p = "You are SURYAMITHRA GPT, a friendly, expert AI tutor and placement coach inside a college student-success platform. "
+       . "You can answer ANY question a student asks: programming (Python, Java, C, C++, JavaScript, SQL, web, DSA), computer science, "
+       . "engineering and science subjects, maths, aptitude and reasoning, communication skills, career guidance, resumes, interview preparation, "
+       . "projects, and general knowledge. Do not say a topic is outside your scope unless it is unsafe or harmful.\n\n"
+       . "HOW TO TEACH:\n"
+       . "- If the message is short or vague (for example 'need to know python'), do NOT stall with questions. Give a useful answer immediately: "
+       . "what it is, why it matters, a step-by-step learning roadmap, a small example, and 3 practice tasks. Then end with ONE short question about their level or goal.\n"
+       . "- Explain step by step in simple language. Use real-world analogies, a worked example or runnable code with comments, common mistakes, and exam/interview tips.\n"
+       . "- Finish with 2-3 practice questions or next steps so the student keeps learning.\n"
+       . "- Match length to the question: brief for simple questions, thorough for 'explain' requests.\n"
+       . "- Reply in the language the student writes in (English, Tamil, Hindi, ...). Keep code and technical terms in English.\n"
+       . "- Format in Markdown: headings, bullet lists, tables, and fenced code blocks with a language tag. Do NOT use LaTeX; write math in plain text (e.g. speed = distance / time).\n"
+       . "- Be accurate. If unsure, say so instead of guessing.";
 
-    $systemContext = "You are SURYAMITHRA GPT, an elite AI Academic Tutor & Interview Coach for university students. "
-        . "Provide clear, highly engaging, step-by-step explanations, working code snippets, real-world analogies, and exam/interview tips. "
-        . "Format your response using Markdown (headers #, ##, bold **text**, bullet points, code blocks ```lang ... ```, LaTeX math where applicable).";
-
-    if ($studentData) {
-        $systemContext .= " Student Profile: Name: {$studentData['name']}, Dept: {$studentData['department']}, Semester: {$studentData['semester']}.";
-        if (!empty($studentData['gaps'])) {
-            $gList = array_map(fn($g) => $g['skill'] . " (gap: {$g['gap']})", array_slice($studentData['gaps'], 0, 3));
-            $systemContext .= " Student Skill Gaps: " . implode(', ', $gList) . ".";
-        }
-    }
-
-    $formattedMessages = [['role' => 'system', 'content' => $systemContext]];
-
-    foreach ($history as $h) {
-        if (!empty($h['role']) && !empty($h['content'])) {
-            $formattedMessages[] = [
-                'role' => $h['role'] === 'user' ? 'user' : 'assistant',
-                'content' => (string)$h['content']
-            ];
-        }
-    }
-
-    if (empty($history)) {
-        $formattedMessages[] = ['role' => 'user', 'content' => $prompt];
-    }
-
-    $payload = [
-        'model' => defined('OPENAI_MODEL') ? OPENAI_MODEL : 'gpt-4o-mini',
-        'messages' => $formattedMessages,
-        'temperature' => 0.7,
-        'max_tokens' => 1200
-    ];
-
-    $ch = curl_init('https://api.openai.com/v1/chat/completions');
-    curl_setopt_array($ch, [
-        CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_POST => true,
-        CURLOPT_TIMEOUT => 30,
-        CURLOPT_HTTPHEADER => [
-            'Content-Type: application/json',
-            'Authorization: Bearer ' . OPENAI_API_KEY
-        ],
-        CURLOPT_POSTFIELDS => json_encode($payload)
-    ]);
-
-    $res = curl_exec($ch);
-    curl_close($ch);
-
-    if ($res) {
-        $j = json_decode($res, true);
-        if (!empty($j['choices'][0]['message']['content'])) {
-            return $j['choices'][0]['message']['content'];
-        }
-    }
-    return null;
-}
-}
-
-// -------------------------------------------------------------
-// 2. Anthropic API Integration (Claude-3.5)
-// -------------------------------------------------------------
-if (!function_exists('call_anthropic_claude')) {
-function call_anthropic_claude(string $prompt, array $history, ?array $studentData): ?string {
-    if (!defined('LLM_API_KEY') || !LLM_API_KEY || !function_exists('curl_init')) {
-        return null;
-    }
-
-    $systemContext = "You are SURYAMITHRA GPT, an elite AI Academic Tutor & Interview Coach for university students. "
-        . "Provide clear, step-by-step explanations, working code snippets, real-world analogies, and exam/interview tips. "
-        . "Format response in markdown.";
-
-    $formattedMessages = [];
-    foreach ($history as $h) {
-        if (!empty($h['role']) && !empty($h['content'])) {
-            $formattedMessages[] = [
-                'role' => $h['role'] === 'user' ? 'user' : 'assistant',
-                'content' => (string)$h['content']
-            ];
-        }
-    }
-    if (empty($formattedMessages)) {
-        $formattedMessages[] = ['role' => 'user', 'content' => $prompt];
-    }
-
-    $payload = [
-        'model' => defined('LLM_MODEL') ? LLM_MODEL : 'claude-3-5-sonnet-20241022',
-        'max_tokens' => 1200,
-        'system' => $systemContext,
-        'messages' => $formattedMessages
-    ];
-
-    $ch = curl_init('https://api.anthropic.com/v1/messages');
-    curl_setopt_array($ch, [
-        CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_POST => true,
-        CURLOPT_TIMEOUT => 30,
-        CURLOPT_HTTPHEADER => [
-            'Content-Type: application/json',
-            'x-api-key: ' . LLM_API_KEY,
-            'anthropic-version: 2023-06-01'
-        ],
-        CURLOPT_POSTFIELDS => json_encode($payload)
-    ]);
-
-    $res = curl_exec($ch);
-    curl_close($ch);
-
-    if ($res) {
-        $j = json_decode($res, true);
-        if (!empty($j['content'][0]['text'])) {
-            return $j['content'][0]['text'];
-        }
-    }
-    return null;
-}
-}
-
-// -------------------------------------------------------------
-// 3. Ultra-Rich GPT Knowledge Fallback Engine (Offline Mode)
-// -------------------------------------------------------------
-if (!function_exists('gpt_fallback_engine')) {
-function gpt_fallback_engine(string $prompt, string $topic, string $action, ?array $studentData): string {
-    $text = strtolower($prompt . ' ' . $topic);
-
-    // 1. Concept Explainer Mode
     if ($action === 'explain') {
-        if (str_contains($text, 'tree') || str_contains($text, 'bst') || str_contains($text, 'binary')) {
-            return "# 🌲 Binary Search Tree (BST) — Concept & Implementation Guide
-
-## 1. What is a Binary Search Tree?
-A **Binary Search Tree (BST)** is a node-based binary tree data structure with the following properties:
-- The **left subtree** of a node contains only nodes with keys **less than** the node's key.
-- The **right subtree** of a node contains only nodes with keys **greater than** the node's key.
-- Both the left and right subtrees must also be binary search trees.
-
----
-
-## 2. 💡 Real-World Analogy
-Imagine searching for a name in a physical **dictionary**. Instead of reading page 1 to 1000 sequentially, you open to page 500. If your target name starts with 'M' and page 500 is 'N', you immediately discard the entire right half and search the left half!
-
----
-
-## 3. ⏱️ Time Complexity Analysis
-| Operation | Average Case | Worst Case (Unbalanced / Skewed) |
-|---|---|---|
-| **Search** | `O(log N)` | `O(N)` |
-| **Insertion** | `O(log N)` | `O(N)` |
-| **Deletion** | `O(log N)` | `O(N)` |
-
-*Note: Self-balancing trees like **AVL Trees** and **Red-Black Trees** guarantee `O(log N)` worst-case performance.*
-
----
-
-## 4. 💻 Java Implementation
-```java
-class BSTNode {
-    int val;
-    BSTNode left, right;
-
-    public BSTNode(int item) {
-        val = item;
-        left = right = null;
-    }
-}
-
-public class BinarySearchTree {
-    BSTNode root;
-
-    // Search operation
-    public BSTNode search(BSTNode root, int key) {
-        if (root == null || root.val == key) return root;
-        if (key < root.val) return search(root.left, key);
-        return search(root.right, key);
-    }
-}
-```
-
----
-
-## 🎯 Exam & Interview Key Takeaways
-1. **In-Order Traversal** (`Left -> Root -> Right`) of a BST always yields elements in **sorted ascending order**!
-2. To convert an unsorted array into a sorted array using BST, build the BST (`O(N log N)`) and perform In-Order Traversal.";
-        }
-
-        if (str_contains($text, 'sql') || str_contains($text, 'join') || str_contains($text, 'dbms')) {
-            return "# 🗄️ SQL Joins & Query Optimization Guide
-
-## 1. What are SQL Joins?
-A **JOIN** clause is used to combine rows from two or more tables based on a related column between them (foreign key relationship).
-
----
-
-## 2. Types of SQL Joins
-- **`INNER JOIN`**: Returns records that have matching values in both tables.
-- **`LEFT (OUTER) JOIN`**: Returns all records from the left table, and the matched records from the right table (NULL if no match).
-- **`RIGHT (OUTER) JOIN`**: Returns all records from the right table, and the matched records from the left table.
-- **`FULL (OUTER) JOIN`**: Returns all records when there is a match in either left or right table.
-
----
-
-## 3. SQL Code Example
-```sql
--- Query: Fetch student name, department, and CGPA for high-performing students
-SELECT 
-    s.student_code, 
-    s.name, 
-    s.department, 
-    a.cgpa 
-FROM students s
-INNER JOIN academic_records a ON s.id = a.student_id
-WHERE a.cgpa >= 8.5
-ORDER BY a.cgpa DESC;
-```
-
----
-
-## ⚡ Performance Tip
-Always create a **Database Index** on columns frequently used in `JOIN` conditions or `WHERE` filters (e.g. `CREATE INDEX idx_student_id ON academic_records(student_id)`). This converts scan time from `O(N * M)` nested loops to `O(N log M)` index lookups!";
-        }
-
-        if (str_contains($text, 'speed') || str_contains($text, 'distance') || str_contains($text, 'aptitude') || str_contains($text, 'time')) {
-            return "# ⏱️ Speed, Distance & Time — Quantitative Aptitude Shortcut Guide
-
-## 1. Core Formulas
-- $\text{Speed} = \frac{\text{Distance}}{\text{Time}}$
-- $\text{Distance} = \text{Speed} \times \text{Time}$
-- $\text{Time} = \frac{\text{Distance}}{\text{Speed}}$
-
----
-
-## 2. Unit Conversions
-- To convert $\text{km/h}$ to $\text{m/s}$: Multiply by $\frac{5}{18}$
-  $$\text{Example: } 72 \text{ km/h} = 72 \times \frac{5}{18} = 20 \text{ m/s}$$
-- To convert $\text{m/s}$ to $\text{km/h}$: Multiply by $\frac{18}{5}$
-
----
-
-## 3. Relative Speed Rules
-- Objects moving in **opposite directions**: Add speeds ($\text{Speed}_{\text{rel}} = S_1 + S_2$)
-- Objects moving in **same direction**: Subtract speeds ($\text{Speed}_{\text{rel}} = |S_1 - S_2|$)
-
----
-
-## 💡 Train Problem Shortcuts
-- When a train crosses a **post / standing man**: Distance = Length of train ($L_t$)
-- When a train crosses a **platform / bridge / tunnel**: Distance = Length of train ($L_t$) + Length of platform ($L_p$)";
-        }
-
-        // Generic Structured Concept Explainer
-        return "# 📚 Concept Mastery: " . e($topic ?: 'Core Subject') . "
-
-## 1. Overview & Definition
-" . e($topic ?: 'This topic') . " is a core module in your academic curriculum and competitive placement readiness track.
-
----
-
-## 2. Key Pillars & Principles
-1. **Foundational Understanding**: Master the theoretical definitions, syntax, and architectural mechanics.
-2. **Practical Application**: Write clean code / solve 3 to 5 real practice problems daily.
-3. **Optimization & Efficiency**: Analyze time complexity $O(N)$ and space constraints $O(1)$.
-
----
-
-## 🎯 Recommended Action
-Switch to the **📝 Quiz Studio** or **⚡ Mock Interview** tabs to test your knowledge on " . e($topic ?: 'this subject') . " right now!";
+        $p .= "\n\nMODE: Deep Concept Explainer. Use this structure: 1) Definition 2) Intuition / analogy 3) How it works step by step "
+            . "4) Code example 5) Key formulas or complexity 6) Common mistakes 7) Exam and interview takeaways 8) Practice questions.";
+    } elseif ($action === 'prep') {
+        $p .= "\n\nMODE: Mock Interviewer. Act as a professional interviewer. Ask exactly ONE question at a time (mix technical, coding and HR). "
+            . "When the student answers, give short feedback: a score out of 10, what was good, what to improve, and a model answer; then ask the next question. "
+            . "If no role is specified, assume a fresher Software Developer role and begin with the first question.";
     }
 
-    // 2. Quiz Mode
-    if ($action === 'quiz') {
-        $questions = [
-            [
-                'q' => 'What is the average time complexity of searching an element in a balanced Binary Search Tree?',
-                'opts' => ['O(1)', 'O(log N)', 'O(N)', 'O(N^2)'],
-                'ans' => 1,
-                'exp' => 'In a balanced BST, each comparison reduces the search space by half, resulting in logarithmic time O(log N).'
-            ],
-            [
-                'q' => 'Which SQL clause is specifically used to filter results of aggregate functions (like COUNT, SUM, AVG)?',
-                'opts' => ['WHERE', 'HAVING', 'GROUP BY', 'ORDER BY'],
-                'ans' => 1,
-                'exp' => 'HAVING filters aggregated groups after GROUP BY, whereas WHERE filters individual rows before aggregation.'
-            ],
-            [
-                'q' => 'In Java, which keyword is used to stop a class from being inherited?',
-                'opts' => ['static', 'final', 'abstract', 'private'],
-                'ans' => 1,
-                'exp' => 'Declaring a class as `final` prevents any other class from extending it.'
-            ],
-            [
-                'q' => 'A train 150m long is running at 54 km/h. How many seconds will it take to cross a pole?',
-                'opts' => ['8 seconds', '10 seconds', '12 seconds', '15 seconds'],
-                'ans' => 1,
-                'exp' => 'Speed = 54 * (5/18) = 15 m/s. Time = Distance / Speed = 150 / 15 = 10 seconds.'
-            ],
-            [
-                'q' => 'Which data structure works on the Last-In, First-Out (LIFO) principle?',
-                'opts' => ['Queue', 'Stack', 'Array', 'Linked List'],
-                'ans' => 1,
-                'exp' => 'Stack operates on LIFO (the last inserted element is the first one removed).'
-            ]
-        ];
-        return json_encode(['topic' => $topic ?: 'Computer Science & Aptitude', 'questions' => $questions]);
-    }
-
-    // 3. Prep / Interview Mode
-    if ($action === 'prep') {
-        return <<<'EOT'
-# ⚡ AI Technical & Behavioral Placement Drill
-
-## 👨‍💻 Question 1: Technical Coding Challenge
-**Problem:** Given an integer array `nums`, return `true` if any value appears at least twice in the array, and return `false` if every element is distinct.
-
-### 💡 Optimal Approach: HashSet (O(N) Time, O(N) Space)
-```java
-import java.util.HashSet;
-
-public class Solution {
-    public boolean containsDuplicate(int[] nums) {
-        HashSet<Integer> seen = new HashSet<>();
-        for (int num : nums) {
-            if (seen.contains(num)) {
-                return true;
-            }
-            seen.add(num);
-        }
-        return false;
-    }
-}
-```
-
----
-
-## 💬 Question 2: Behavioral / HR Interview Question
-**Question:** *"Tell me about a time you had a conflict in a team project and how you resolved it."*
-
-### 🎯 Answer Strategy (STAR Method):
-- **Situation:** "During our 3rd-year web development project, our team of 4 was split on whether to use SQL or MongoDB."
-- **Task:** "We needed to select the database framework within 24 hours to meet our sprint milestone."
-- **Action:** "I organized a quick 30-minute discussion where we listed our schema relationships (ACID transactions, relational joins). I demonstrated that SQL fit our multi-table grade management data better."
-- **Result:** "The team agreed unanimously, and we completed the project 2 days ahead of schedule with zero data inconsistency."
-EOT;
-    }
-
-    // 4. Default Interactive Chat Output
-    $topicName = e($prompt ?: $topic);
-    return <<<EOT
-# 🤖 SURYAMITHRA GPT Response
-
-Great question! Here is a step-by-step breakdown:
-
-### Key Takeaways:
-1. **Core Definition**: {$topicName} plays a vital role in both semester coursework and placement interviews.
-2. **Best Practice**: Always break problems into sub-components, write sample code/derivations, and test edge cases.
-
-```java
-// Example Code Pattern
-public class Practice {
-    public static void main(String[] args) {
-        System.out.println("Keep practicing daily!");
-    }
-}
-```
-
-Would you like me to generate a **5-question practice quiz** or a **step-by-step code example** for this topic?
-EOT;
-}
-}
-
-// -------------------------------------------------------------
-// 0. Google Gemini API Integration (AI Studio Key)
-// -------------------------------------------------------------
-if (!function_exists('call_google_gemini')) {
-function call_google_gemini(string $prompt, array $history, ?array $studentData, string $action): ?string {
-    if (!defined('GEMINI_API_KEY') || !GEMINI_API_KEY || !function_exists('curl_init')) {
-        return null;
-    }
-
-    $apiKey = GEMINI_API_KEY;
-    $models = ['gemma-4-26b-a4b-it', 'gemini-3.8-flash', 'gemini-3.5-flash', 'gemini-flash-latest'];
-
-    $systemContext = "You are SURYAMITHRA AI Learning Copilot, powered by Google Gemini. "
-        . "You are an expert university AI tutor and placement coach. "
-        . "Provide clear, step-by-step explanations, working code examples (Java, Python, C++, SQL), real-world analogies, and interview tips. "
-        . "Format responses cleanly using Markdown.";
-
-    if ($studentData) {
-        $systemContext .= " Student context: Name: {$studentData['name']}, Dept: {$studentData['department']}, Semester: {$studentData['semester']}.";
-        if (!empty($studentData['gaps'])) {
-            $gList = array_map(fn($g) => $g['skill'] . " (gap: {$g['gap']})", array_slice($studentData['gaps'], 0, 3));
-            $systemContext .= " Skill Gaps: " . implode(', ', $gList) . ".";
+    $name = $s['name'] ?? $u['name'] ?? 'Student';
+    $p .= "\n\nSTUDENT: Name: {$name}";
+    if ($s) {
+        $p .= ", Department: " . ($s['department'] ?? '-') . ", Semester: " . ($s['semester'] ?? '-') . ".";
+        if (!empty($s['gaps'])) {
+            $g = array_map(fn($x) => ($x['skill'] ?? '?') . ' (gap ' . ($x['gap'] ?? '?') . ')', array_slice($s['gaps'], 0, 3));
+            $p .= " Skill gaps to reinforce when relevant: " . implode(', ', $g) . ".";
         }
     }
+    return $p;
+}
 
-    $contents = [];
-    foreach ($history as $h) {
-        if (!empty($h['role']) && !empty($h['content'])) {
-            $contents[] = [
-                'role' => $h['role'] === 'user' ? 'user' : 'model',
-                'parts' => [['text' => (string)$h['content']]]
-            ];
-        }
+function tutor_extract_json(string $text): ?array
+{
+    $text = trim(preg_replace('/^```(?:json)?|```$/m', '', trim($text)));
+    $a = strpos($text, '{'); $b = strrpos($text, '}');
+    if ($a === false || $b === false || $b <= $a) return null;
+    $j = json_decode(substr($text, $a, $b - $a + 1), true);
+    return is_array($j) ? $j : null;
+}
+
+function tutor_clean_quiz(?array $j, string $topic): ?array
+{
+    if (!$j || empty($j['questions']) || !is_array($j['questions'])) return null;
+    $qs = [];
+    foreach ($j['questions'] as $x) {
+        $opts = array_values(array_map('strval', $x['opts'] ?? $x['options'] ?? []));
+        $ans = $x['ans'] ?? $x['answer'] ?? null;
+        if (!is_numeric($ans)) continue;
+        $ans = (int)$ans;
+        if (count($opts) < 2 || $ans < 0 || $ans >= count($opts) || empty($x['q'])) continue;
+        $qs[] = ['q' => (string)$x['q'], 'opts' => $opts, 'ans' => $ans, 'exp' => (string)($x['exp'] ?? $x['explanation'] ?? '')];
     }
-
-    if (empty($contents)) {
-        $contents[] = [
-            'role' => 'user',
-            'parts' => [['text' => $systemContext . "\n\nUser Question: " . $prompt]]
-        ];
-    } else {
-        $contents[] = [
-            'role' => 'user',
-            'parts' => [['text' => $prompt]]
-        ];
-    }
-
-    $payload = [
-        'contents' => $contents
-    ];
-
-    foreach ($models as $model) {
-        $url = "https://generativelanguage.googleapis.com/v1beta/models/{$model}:generateContent?key={$apiKey}";
-
-        $ch = curl_init($url);
-        curl_setopt_array($ch, [
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_POST => true,
-            CURLOPT_TIMEOUT => 25,
-            CURLOPT_HTTPHEADER => ['Content-Type: application/json'],
-            CURLOPT_POSTFIELDS => json_encode($payload)
-        ]);
-
-        $res = curl_exec($ch);
-        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        curl_close($ch);
-
-        if ($httpCode === 200 && $res) {
-            $j = json_decode($res, true);
-            $text = $j['candidates'][0]['content']['parts'][0]['text'] ?? null;
-            if ($text) {
-                return $text;
-            }
-        }
-    }
-
-    return null;
-}
+    return $qs ? ['topic' => (string)($j['topic'] ?? $topic), 'questions' => $qs] : null;
 }
 
-// -------------------------------------------------------------
-// Execution Flow: Try OpenAI GPT -> Try Gemini -> Try Anthropic -> Fallback Engine
-// -------------------------------------------------------------
-$promptText = $q ?: $topic;
-
-$aiResponse = call_openai_gpt($promptText, $messagesHistory, $studentData, $action);
-
-if (!$aiResponse) {
-    $aiResponse = call_google_gemini($promptText, $messagesHistory, $studentData, $action);
-}
-
-if (!$aiResponse) {
-    $aiResponse = call_anthropic_claude($promptText, $messagesHistory, $studentData);
-}
-
-if (!$aiResponse) {
-    $aiResponse = gpt_fallback_engine($promptText, $topic, $action, $studentData);
-}
+// ------------------------------------------------------------------ run the AI
+$system = tutor_system_prompt($action, $studentData, $u);
+$debug  = defined('AI_DEBUG') && AI_DEBUG;
 
 if ($action === 'quiz') {
-    // If output is raw json, return directly
-    if (str_starts_with(trim($aiResponse), '{') || str_starts_with(trim($aiResponse), '[')) {
-        echo $aiResponse;
-        exit;
+    $n = preg_match('/\b(\d{1,2})\b/', $prompt, $m) ? max(3, min(10, (int)$m[1])) : 5;
+    $system .= "\n\nMODE: Quiz Studio. Respond with ONLY valid JSON (no markdown, no commentary) in exactly this shape: "
+        . '{"topic":"string","questions":[{"q":"question text","opts":["A","B","C","D"],"ans":0,"exp":"why the answer is correct"}]}'
+        . " where 'ans' is the zero-based index of the correct option. Make {$n} questions with 4 plausible options each, mixed difficulty, factually correct.";
+    $messages = [['role' => 'user', 'content' => "Create a quiz about: {$prompt}"]];
+    $r = ai_generate($system, $messages, ['json' => true, 'max_tokens' => 2500, 'temperature' => 0.5]);
+
+    $quiz = $r['ok'] ? tutor_clean_quiz(tutor_extract_json($r['text']), $prompt) : null;
+    if (!$quiz && $r['ok']) { // model answered but not as JSON: retry once, stricter
+        $r = ai_generate($system, [['role' => 'user', 'content' => "Output ONLY the JSON object for a {$n}-question quiz about: {$prompt}"]],
+            ['json' => true, 'max_tokens' => 2500, 'temperature' => 0.2]);
+        $quiz = $r['ok'] ? tutor_clean_quiz(tutor_extract_json($r['text']), $prompt) : null;
+    }
+    if ($quiz) {
+        tutor_respond(['success' => true, 'action' => 'quiz', 'topic' => $topic, 'quiz' => $quiz, 'provider' => $r['provider']]);
+    }
+} else {
+    $messages = ai_normalize_messages($history, $prompt);
+    $r = ai_generate($system, $messages, ['max_tokens' => $action === 'chat' ? 1800 : 2500]);
+    if ($r['ok']) {
+        tutor_respond(['success' => true, 'action' => $action, 'topic' => $topic, 'answer' => $r['text'], 'provider' => $r['provider']]);
     }
 }
 
-echo json_encode([
-    'success' => true,
-    'action' => $action,
-    'topic' => $topic,
-    'answer' => $aiResponse
-]);
+// ------------------------------------------------- AI failed: offline demo / error
+$off = ai_offline_answer($prompt, $topic, $action);
+if ($off !== null) {
+    if ($action === 'quiz') {
+        $quiz = tutor_clean_quiz(json_decode($off, true), $prompt);
+        if ($quiz) tutor_respond(['success' => true, 'action' => 'quiz', 'quiz' => $quiz, 'provider' => 'offline',
+            'notice' => 'AI service unreachable - showing a built-in sample quiz.'] + ($debug ? ['debug' => $r['errors']] : []));
+    } else {
+        tutor_respond(['success' => true, 'action' => $action, 'provider' => 'offline',
+            'answer' => "> ⚠️ **Offline demo mode** - the AI service could not be reached, so this is a built-in sample answer.\n\n" . $off]
+            + ($debug ? ['debug' => $r['errors']] : []));
+    }
+}
+
+$why = $r['errors'] ?: ['unknown'];
+$noKey = !ai_configured_providers();
+tutor_respond([
+    'error' => $noKey
+        ? 'AI tutor is not set up yet: no API key is configured. Ask your administrator to add one.'
+        : 'The AI service is not responding right now. Please try again in a moment.',
+] + ($debug ? ['debug' => $why] : []), $noKey ? 503 : 502);

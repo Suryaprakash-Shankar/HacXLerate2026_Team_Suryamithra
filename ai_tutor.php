@@ -36,6 +36,7 @@ include __DIR__ . '/includes/header.php';
 
 <!-- Marked.js for ChatGPT-style Markdown rendering -->
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
 
 <style>
 .gpt-wrapper { display: flex; flex-direction: column; gap: 20px; }
@@ -77,6 +78,17 @@ include __DIR__ . '/includes/header.php';
 .quiz-option:hover { border-color: var(--primary); background: var(--soft); }
 .quiz-option.correct { background: #dcf6ea; border-color: var(--green); color: #0b7a4b; font-weight: 700; }
 .quiz-option.wrong { background: #ffe9ea; border-color: var(--red); color: #c4262c; }
+
+.thinking { display:inline-flex; gap:5px; align-items:center; color:var(--muted,#667); }
+.thinking i { width:7px; height:7px; border-radius:50%; background:var(--primary); opacity:.35; animation: blink 1.2s infinite; }
+.thinking i:nth-child(2){ animation-delay:.2s } .thinking i:nth-child(3){ animation-delay:.4s }
+@keyframes blink { 0%,80%,100%{opacity:.25} 40%{opacity:1} }
+.msg-content table { border-collapse:collapse; margin:10px 0; font-size:13.5px; }
+.msg-content th, .msg-content td { border:1px solid var(--line); padding:6px 10px; }
+.msg-content pre code { background:none; color:inherit; padding:0; }
+.quiz-q { font-weight:800; margin:14px 0 8px; }
+.quiz-exp { display:none; font-size:13.5px; margin:-2px 0 12px; padding:10px 14px; border-radius:12px; background:var(--soft,#f1f2ff); }
+.chat-input-bar button[disabled] { opacity:.6; cursor:not-allowed; }
 </style>
 
 <div class="gpt-wrapper">
@@ -148,103 +160,158 @@ include __DIR__ . '/includes/header.php';
 
 <script>
 var csrf = <?= json_encode(csrf_token()) ?>;
+var API_URL = <?= json_encode(url('api/ai_tutor.php')) ?>;
 var currentMode = 'chat';
 var conversationHistory = [];
+var busy = false;
 
-// Initialize Marked Parser if available
-if (typeof marked !== 'undefined') {
-  marked.setOptions({ gfm: true, breaks: true });
+if (typeof marked !== 'undefined') marked.setOptions({ gfm: true, breaks: true });
+
+function renderMarkdown(md) {
+  var html = (typeof marked !== 'undefined') ? marked.parse(md) : md.replace(/</g, '&lt;').replace(/\n/g, '<br>');
+  return (typeof DOMPurify !== 'undefined') ? DOMPurify.sanitize(html) : html.replace(/<script[\s\S]*?<\/script>/gi, '');
 }
 
-// Mode Selection
+function setMode(mode) {
+  currentMode = mode;
+  document.querySelectorAll('.gpt-tab').forEach(function (t) { t.classList.toggle('active', t.dataset.mode === mode); });
+}
+
 document.querySelectorAll('.gpt-tab').forEach(function (tab) {
-  tab.addEventListener('click', function () {
-    document.querySelectorAll('.gpt-tab').forEach(t => t.classList.remove('active'));
-    this.classList.add('active');
-    currentMode = this.dataset.mode;
-  });
+  tab.addEventListener('click', function () { setMode(this.dataset.mode); });
 });
 
-// Preset Chips
+// Preset chips (quiz / interview chips switch to the matching mode)
 document.querySelectorAll('.preset-chip').forEach(function (chip) {
   chip.addEventListener('click', function () {
-    document.getElementById('userInput').value = this.dataset.p;
-    sendPrompt(this.dataset.p);
+    var p = this.dataset.p;
+    if (/quiz/i.test(p)) setMode('quiz'); else if (/mock interview/i.test(p)) setMode('prep'); else if (currentMode !== 'chat' && currentMode !== 'explain') setMode('chat');
+    sendPrompt(p);
   });
 });
 
-// Submit Form
 document.getElementById('chatForm').addEventListener('submit', function (e) {
   e.preventDefault();
   var input = document.getElementById('userInput');
   var val = input.value.trim();
-  if (!val) return;
-  sendPrompt(val);
+  if (!val || busy) return;
   input.value = '';
+  sendPrompt(val);
 });
 
-function appendMessage(role, rawContent) {
+function scrollDown() { var c = document.getElementById('chatMessages'); c.scrollTop = c.scrollHeight; }
+
+function appendMessage(role, text) {
   var container = document.getElementById('chatMessages');
   var bubble = document.createElement('div');
   bubble.className = 'msg-bubble ' + (role === 'user' ? 'user' : 'ai');
-
   var avatar = document.createElement('div');
   avatar.className = 'msg-avatar';
   avatar.textContent = role === 'user' ? 'YOU' : 'GPT';
-
   var content = document.createElement('div');
   content.className = 'msg-content';
-
-  if (role === 'user') {
-    content.textContent = rawContent;
-  } else {
-    if (typeof marked !== 'undefined') {
-      content.innerHTML = marked.parse(rawContent);
-    } else {
-      content.innerHTML = rawContent;
-    }
-  }
-
-  bubble.appendChild(avatar);
-  bubble.appendChild(content);
-  container.appendChild(bubble);
-
-  container.scrollTop = container.scrollHeight;
+  if (role === 'user') content.textContent = text; else content.innerHTML = renderMarkdown(text);
+  bubble.appendChild(avatar); bubble.appendChild(content); container.appendChild(bubble);
+  scrollDown();
   return content;
 }
 
-function sendPrompt(promptText) {
-  appendMessage('user', promptText);
+function showError(el, msg, debug) {
+  el.textContent = '';
+  var d = document.createElement('div');
+  d.className = 'flash err'; d.style.margin = '0';
+  d.textContent = '⚠️ ' + msg;
+  el.appendChild(d);
+  if (debug && debug.length) {
+    var pre = document.createElement('pre');
+    pre.textContent = 'Debug (AI_DEBUG is on):\n' + debug.join('\n');
+    el.appendChild(pre);
+  }
+}
 
-  // Push to local conversation history
+function renderQuiz(el, quiz, notice) {
+  el.textContent = '';
+  var h = document.createElement('strong');
+  h.textContent = '📝 Quiz: ' + (quiz.topic || 'Practice');
+  el.appendChild(h);
+  if (notice) { var n = document.createElement('p'); n.textContent = '⚠️ ' + notice; n.style.fontSize = '13px'; el.appendChild(n); }
+  var score = 0, answered = 0;
+  var scoreEl = document.createElement('p');
+  scoreEl.style.fontWeight = '800';
+  el.appendChild(scoreEl);
+  function updateScore() { scoreEl.textContent = 'Score: ' + score + ' / ' + quiz.questions.length + (answered === quiz.questions.length ? '  🎉 Done!' : ''); }
+  updateScore();
+
+  quiz.questions.forEach(function (qq, qi) {
+    var qEl = document.createElement('div'); qEl.className = 'quiz-q'; qEl.textContent = (qi + 1) + '. ' + qq.q; el.appendChild(qEl);
+    var exp = document.createElement('div'); exp.className = 'quiz-exp'; exp.textContent = '💡 ' + (qq.exp || '');
+    var opts = [];
+    qq.opts.forEach(function (o, oi) {
+      var b = document.createElement('div'); b.className = 'quiz-option'; b.textContent = String.fromCharCode(65 + oi) + ') ' + o;
+      b.addEventListener('click', function () {
+        if (b.dataset.done || opts.some(function (x) { return x.dataset.done; })) return;
+        opts.forEach(function (x) { x.dataset.done = '1'; });
+        answered++;
+        if (oi === qq.ans) { b.classList.add('correct'); score++; } else { b.classList.add('wrong'); opts[qq.ans].classList.add('correct'); }
+        exp.style.display = 'block'; updateScore();
+      });
+      opts.push(b); el.appendChild(b);
+    });
+    el.appendChild(exp);
+  });
+}
+
+function sendPrompt(promptText) {
+  if (busy) return;
+  busy = true;
+  var btn = document.querySelector('#chatForm button[type=submit]');
+  btn.disabled = true;
+
+  appendMessage('user', promptText);
   conversationHistory.push({ role: 'user', content: promptText });
 
-  var aiContentEl = appendMessage('ai', 'Thinking… 🤖');
+  var aiEl = appendMessage('ai', '');
+  aiEl.innerHTML = '<span class="thinking">Thinking <i></i><i></i><i></i></span>';
 
   var fd = new FormData();
   fd.append('action', currentMode);
   fd.append('topic', promptText);
   fd.append('q', promptText);
-  fd.append('messages', JSON.stringify(conversationHistory.slice(-8))); // send last 8 turns
+  fd.append('messages', JSON.stringify(conversationHistory.slice(-10)));
   fd.append('csrf', csrf);
 
-  fetch(<?= json_encode(url('api/ai_tutor.php')) ?>, { method: 'POST', body: fd })
-    .then(r => r.json())
-    .then(data => {
-      var ans = data.answer || 'No response generated.';
-      if (typeof marked !== 'undefined') {
-        aiContentEl.innerHTML = marked.parse(ans);
-      } else {
-        aiContentEl.innerHTML = ans;
-      }
+  var ctrl = new AbortController();
+  var timer = setTimeout(function () { ctrl.abort(); }, 90000);
 
-      // Add to conversation history
-      conversationHistory.push({ role: 'assistant', content: ans });
-      var container = document.getElementById('chatMessages');
-      container.scrollTop = container.scrollHeight;
+  function finish(ok) {
+    clearTimeout(timer); busy = false; btn.disabled = false;
+    if (!ok) conversationHistory.pop(); // keep history clean when the turn failed
+    scrollDown();
+    document.getElementById('userInput').focus();
+  }
+
+  fetch(API_URL, { method: 'POST', body: fd, signal: ctrl.signal, credentials: 'same-origin' })
+    .then(function (r) { return r.text().then(function (t) { return { status: r.status, text: t }; }); })
+    .then(function (res) {
+      var data;
+      try { data = JSON.parse(res.text); }
+      catch (e) { showError(aiEl, 'Server returned an unexpected response (HTTP ' + res.status + '). Please reload the page and try again.'); return finish(false); }
+
+      if (data.error) { showError(aiEl, data.error, data.debug); return finish(false); }
+
+      if (data.quiz) {
+        renderQuiz(aiEl, data.quiz, data.notice);
+        conversationHistory.push({ role: 'assistant', content: 'Quiz on ' + (data.quiz.topic || promptText) });
+      } else {
+        var ans = data.answer || 'No response generated.';
+        aiEl.innerHTML = renderMarkdown(ans);
+        conversationHistory.push({ role: 'assistant', content: ans });
+      }
+      finish(true);
     })
-    .catch(err => {
-      aiContentEl.innerHTML = '<div class="flash err" style="margin:0;">Connection error. Please try again.</div>';
+    .catch(function (err) {
+      showError(aiEl, err && err.name === 'AbortError' ? 'The AI took too long to answer. Please try again.' : 'Connection error. Check your internet and try again.');
+      finish(false);
     });
 }
 </script>
