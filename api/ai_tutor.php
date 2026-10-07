@@ -18,7 +18,8 @@ if (!hash_equals($_SESSION['csrf'] ?? '', $_POST['csrf'] ?? '')) {
 $action = trim($_POST['action'] ?? 'chat');
 $topic  = trim($_POST['topic'] ?? '');
 $q      = trim($_POST['q'] ?? '');
-$diff   = trim($_POST['diff'] ?? 'Medium');
+$messagesJson = $_POST['messages'] ?? '[]';
+$messagesHistory = json_decode($messagesJson, true) ?: [];
 
 // Fetch student profile context if applicable
 $studentData = null;
@@ -29,236 +30,112 @@ if ($u['role'] === 'student') {
     $studentData = $r[0] ?? null;
 }
 
-// Built-in Knowledge Generator for Core Subjects
-if (!function_exists('generate_knowledge')) {
-function generate_knowledge(string $topic, string $action, ?array $studentData): string {
-    $topicLower = strtolower($topic);
-
-    // 1. Concept Explainer Mode
-    if ($action === 'explain') {
-        if (str_contains($topicLower, 'tree') || str_contains($topicLower, 'binary') || str_contains($topicLower, 'bst')) {
-            return '
-            <h3>Binary Search Tree (BST) Concept Breakdown</h3>
-            <p><strong>Core Concept:</strong> A node-based binary tree data structure where the left subtree contains nodes with keys less than the parent node, and the right subtree contains nodes with keys greater than the parent node.</p>
-            <div class="card" style="background:var(--paper);margin:12px 0;">
-              <strong>💡 Real-World Analogy:</strong> Think of a phone directory or dictionary. Instead of checking every page one by one, you open to the middle and decide whether to search the left half or right half!
-            </div>
-            <h4>Key Operations & Time Complexities:</h4>
-            <ul>
-              <li><strong>Search / Insert / Delete (Average):</strong> <code>O(log N)</code></li>
-              <li><strong>Search / Insert / Delete (Worst Case - Skewed):</strong> <code>O(N)</code></li>
-              <li><strong>In-Order Traversal:</strong> Yields elements in sorted ascending order!</li>
-            </ul>
-            <h4>Code Example (Java):</h4>
-            <pre><code>class Node {
-    int key;
-    Node left, right;
-    public Node(int item) { key = item; left = right = null; }
-}</code></pre>
-            <div class="card" style="border-left:4px solid var(--primary);margin-top:12px;">
-              <strong>Exam & Interview Tip:</strong> Always state that BST worst-case time complexity is <code>O(N)</code> when the tree is unbalanced, which is why AVL Trees and Red-Black Trees are used to maintain <code>O(log N)</code> height balance!
-            </div>';
-        }
-
-        if (str_contains($topicLower, 'sql') || str_contains($topicLower, 'join') || str_contains($topicLower, 'query')) {
-            return '
-            <h3>SQL Joins & Database Querying</h3>
-            <p><strong>Core Concept:</strong> SQL Joins combine rows from two or more tables based on a related column between them.</p>
-            <ul>
-              <li><strong>INNER JOIN:</strong> Returns records that have matching values in both tables.</li>
-              <li><strong>LEFT JOIN:</strong> Returns all records from the left table, and matched records from the right table (NULL if no match).</li>
-              <li><strong>RIGHT JOIN:</strong> Returns all records from the right table, and matched records from the left.</li>
-              <li><strong>FULL OUTER JOIN:</strong> Returns all records when there is a match in either left or right table.</li>
-            </ul>
-            <h4>Example SQL Query:</h4>
-            <pre><code>SELECT s.name, s.student_code, a.cgpa 
-FROM students s 
-LEFT JOIN academic_records a ON s.id = a.student_id 
-WHERE a.cgpa >= 8.0;</code></pre>
-            <div class="card" style="background:var(--paper);margin-top:12px;">
-              <strong>Interview Formula:</strong> Use <code>INDEX</code> on Foreign Key join columns to speed up Join performance from <code>O(N * M)</code> to <code>O(N log M)</code>!
-            </div>';
-        }
-
-        if (str_contains($topicLower, 'aptitude') || str_contains($topicLower, 'speed') || str_contains($topicLower, 'distance') || str_contains($topicLower, 'time')) {
-            return '
-            <h3>Speed, Distance & Time Mastery</h3>
-            <p><strong>Fundamental Formula:</strong> <code>Speed = Distance / Time</code></p>
-            <ul>
-              <li><strong>Unit Conversion:</strong> 
-                <ul>
-                  <li>To convert km/h to m/s: Multiply by <code>5/18</code></li>
-                  <li>To convert m/s to km/h: Multiply by <code>18/5</code></li>
-                </ul>
-              </li>
-              <li><strong>Average Speed:</strong> <code>(2 * S1 * S2) / (S1 + S2)</code> when distance traveled at both speeds is equal!</li>
-              <li><strong>Relative Speed:</strong>
-                <ul>
-                  <li>Objects moving in opposite directions: <code>S1 + S2</code></li>
-                  <li>Objects moving in same direction: <code>|S1 - S2|</code></li>
-                </ul>
-              </li>
-            </ul>
-            <div class="card" style="border-left:4px solid var(--amber);margin-top:12px;">
-              <strong>Quick Practice Shortcut:</strong> If a train crosses a pole, distance = length of train. If a train crosses a platform/bridge, distance = length of train + length of platform!
-            </div>';
-        }
-
-        // Default General Concept Explainer
-        return '
-        <h3>AI Learning Guide: ' . e($topic) . '</h3>
-        <p><strong>Overview:</strong> ' . e($topic) . ' is a fundamental topic in your academic curriculum and career readiness track.</p>
-        <div class="card" style="background:var(--paper);margin:12px 0;">
-          <strong>🎯 Key Takeaways:</strong>
-          <ul>
-            <li>Understand the foundational definitions and core mechanics of ' . e($topic) . '.</li>
-            <li>Practice solving 3 to 5 real problems or code implementations daily.</li>
-            <li>Connect theoretical principles with practical application in project work.</li>
-          </ul>
-        </div>
-        <p>Use the <strong>AI Quiz Generator</strong> tab to test your mastery of ' . e($topic) . ' right now!</p>';
+// -------------------------------------------------------------
+// 1. OpenAI API Integration (GPT-4o / GPT-4o-mini)
+// -------------------------------------------------------------
+if (!function_exists('call_openai_gpt')) {
+function call_openai_gpt(string $prompt, array $history, ?array $studentData, string $action): ?string {
+    if (!defined('OPENAI_API_KEY') || !OPENAI_API_KEY || !function_exists('curl_init')) {
+        return null;
     }
 
-    // 2. Quiz Generator Mode
-    if ($action === 'quiz') {
-        $questions = [];
-        if (str_contains($topicLower, 'sql') || str_contains($topicLower, 'dbms')) {
-            $questions = [
-                [
-                    'q' => 'Which SQL clause is used to filter records resulting from an aggregate function like COUNT() or AVG()?',
-                    'opts' => ['WHERE', 'HAVING', 'GROUP BY', 'ORDER BY'],
-                    'ans' => 1,
-                    'exp' => 'HAVING filters aggregated groups, whereas WHERE filters individual rows before aggregation.'
-                ],
-                [
-                    'q' => 'What type of JOIN returns all records from the left table and matched records from the right table?',
-                    'opts' => ['INNER JOIN', 'RIGHT JOIN', 'LEFT JOIN', 'CROSS JOIN'],
-                    'ans' => 2,
-                    'exp' => 'LEFT JOIN keeps all rows from the left table regardless of matching records in the right table.'
-                ],
-                [
-                    'q' => 'Which constraint ensures that all values in a column are distinct and not null?',
-                    'opts' => ['FOREIGN KEY', 'UNIQUE', 'PRIMARY KEY', 'CHECK'],
-                    'ans' => 2,
-                    'exp' => 'PRIMARY KEY uniquely identifies each row and automatically enforces UNIQUE + NOT NULL constraints.'
-                ]
-            ];
-        } else if (str_contains($topicLower, 'java') || str_contains($topicLower, 'oop')) {
-            $questions = [
-                [
-                    'q' => 'Which keyword in Java prevents a class from being inherited?',
-                    'opts' => ['static', 'final', 'abstract', 'private'],
-                    'ans' => 1,
-                    'exp' => 'Declaring a class as `final` prevents it from being extended/subclassed in Java.'
-                ],
-                [
-                    'q' => 'Which concept allows a subclass to provide a specific implementation of a method declared in its parent class?',
-                    'opts' => ['Method Overloading', 'Method Overriding', 'Encapsulation', 'Abstraction'],
-                    'ans' => 1,
-                    'exp' => 'Method Overriding (runtime polymorphism) allows a child class to redefine a parent method.'
-                ],
-                [
-                    'q' => 'Which collection class in Java allows duplicate elements and maintains insertion order?',
-                    'opts' => ['HashSet', 'ArrayList', 'TreeSet', 'HashMap'],
-                    'ans' => 1,
-                    'exp' => 'ArrayList stores elements sequentially in insertion order and allows duplicates.'
-                ]
-            ];
-        } else {
-            $questions = [
-                [
-                    'q' => 'What is the time complexity of searching an element in a balanced Binary Search Tree?',
-                    'opts' => ['O(1)', 'O(log N)', 'O(N)', 'O(N^2)'],
-                    'ans' => 1,
-                    'exp' => 'In a balanced BST, searching halves the remaining search space at each step, resulting in O(log N) time.'
-                ],
-                [
-                    'q' => 'Which data structure follows the First-In, First-Out (FIFO) principle?',
-                    'opts' => ['Stack', 'Queue', 'Array', 'Tree'],
-                    'ans' => 1,
-                    'exp' => 'Queue processes elements in FIFO order (the first element added is the first one removed).'
-                ],
-                [
-                    'q' => 'If speed is doubled while distance remains constant, what happens to travel time?',
-                    'opts' => ['It doubles', 'It stays the same', 'It is halved', 'It quadruples'],
-                    'ans' => 2,
-                    'exp' => 'Time = Distance / Speed. Since speed and time are inversely proportional, doubling speed halves time.'
-                ]
-            ];
-        }
-        return json_encode(['topic' => $topic, 'questions' => $questions]);
-    }
+    $systemContext = "You are SURYAMITHRA GPT, an elite AI Academic Tutor & Interview Coach for university students. "
+        . "Provide clear, highly engaging, step-by-step explanations, working code snippets, real-world analogies, and exam/interview tips. "
+        . "Format your response using Markdown (headers #, ##, bold **text**, bullet points, code blocks ```lang ... ```, LaTeX math where applicable).";
 
-    // 3. Placement Prep & Interview Mode
-    if ($action === 'prep') {
-        return '
-        <h3>Interview & Placement Drill: ' . e($topic ?: 'Software Development & Aptitude') . '</h3>
-        <div class="card" style="border:1px solid var(--line);margin-bottom:14px;">
-          <strong>Q1. Technical Problem: Reverse a Linked List in O(N) time and O(1) space</strong>
-          <p><em>Approach:</em> Maintain three pointers: <code>prev = null</code>, <code>current = head</code>, and <code>next = null</code>. Iterate through the list, reassigning <code>current.next = prev</code>.</p>
-          <pre><code>public Node reverseList(Node head) {
-    Node prev = null, current = head;
-    while (current != null) {
-        Node next = current.next;
-        current.next = prev;
-        prev = current;
-        current = next;
-    }
-    return prev;
-}</code></pre>
-        </div>
-        <div class="card" style="border:1px solid var(--line);">
-          <strong>Q2. HR & Behavioral Question: "Tell me about a time you faced a difficult deadline."</strong>
-          <p><strong>Use STAR Method:</strong> Situation $\rightarrow$ Task $\rightarrow$ Action $\rightarrow$ Result.</p>
-          <p><em>Sample Response:</em> "During our 3rd-year web project, we had 3 days to integrate authentication. I prioritized key database schemas, collaborated with my teammate on API endpoints, and delivered 100% of core login flows on time."</p>
-        </div>';
-    }
-
-    // 4. Default Chat Answer
-    return '
-    <p>Great question about <strong>' . e($q ?: $topic) . '</strong>!</p>
-    <p>Here is a concise breakdown to help you master this concept:</p>
-    <ul>
-      <li><strong>Definition:</strong> ' . e($q ?: $topic) . ' is a crucial subject area evaluated in semester exams and placement interviews.</li>
-      <li><strong>Core Principle:</strong> Break down complex problems into smaller sub-problems, practice write-ups, and test code logic line-by-line.</li>
-      <li><strong>Recommended Next Step:</strong> Practice 3 quiz questions using the <strong>AI Quiz Generator</strong> tab!</li>
-    </ul>';
-}
-}
-
-// Check LLM API integration if configured
-if (!function_exists('llm_generate_tutor')) {
-function llm_generate_tutor(string $q, string $topic, string $action, ?array $studentData): ?string {
-    if (!LLM_API_KEY || !function_exists('curl_init')) return null;
-
-    $context = "";
     if ($studentData) {
-        $context = "Student context: Name: {$studentData['name']}, Dept: {$studentData['department']}, Semester: {$studentData['semester']}. ";
+        $systemContext .= " Student Profile: Name: {$studentData['name']}, Dept: {$studentData['department']}, Semester: {$studentData['semester']}.";
         if (!empty($studentData['gaps'])) {
-            $topGaps = array_map(fn($g) => $g['skill'] . " (gap: {$g['gap']})", array_slice($studentData['gaps'], 0, 3));
-            $context .= "Skill gaps: " . implode(', ', $topGaps) . ". ";
+            $gList = array_map(fn($g) => $g['skill'] . " (gap: {$g['gap']})", array_slice($studentData['gaps'], 0, 3));
+            $systemContext .= " Student Skill Gaps: " . implode(', ', $gList) . ".";
         }
     }
 
-    $systemPrompt = "You are SURYAMITHRA AI Learning Copilot, a friendly, highly effective university AI tutor. "
-        . "Your goal is to help students learn academic subjects, practice interview questions, and close skill gaps. "
-        . "Format responses cleanly with HTML tags (<h3>, <h4>, <p>, <ul>, <li>, <code>, <pre>, <div class='card'>). "
-        . "Provide clear explanations, analogies, code examples, and practical exam/interview tips. " . $context;
+    $formattedMessages = [['role' => 'system', 'content' => $systemContext]];
 
-    $userContent = "Action: $action. Topic/Subject: $topic. User Question: $q.";
+    foreach ($history as $h) {
+        if (!empty($h['role']) && !empty($h['content'])) {
+            $formattedMessages[] = [
+                'role' => $h['role'] === 'user' ? 'user' : 'assistant',
+                'content' => (string)$h['content']
+            ];
+        }
+    }
+
+    if (empty($history)) {
+        $formattedMessages[] = ['role' => 'user', 'content' => $prompt];
+    }
 
     $payload = [
-        'model' => LLM_MODEL,
-        'max_tokens' => 900,
-        'system' => $systemPrompt,
-        'messages' => [['role' => 'user', 'content' => $userContent]]
+        'model' => defined('OPENAI_MODEL') ? OPENAI_MODEL : 'gpt-4o-mini',
+        'messages' => $formattedMessages,
+        'temperature' => 0.7,
+        'max_tokens' => 1200
+    ];
+
+    $ch = curl_init('https://api.openai.com/v1/chat/completions');
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_POST => true,
+        CURLOPT_TIMEOUT => 30,
+        CURLOPT_HTTPHEADER => [
+            'Content-Type: application/json',
+            'Authorization: Bearer ' . OPENAI_API_KEY
+        ],
+        CURLOPT_POSTFIELDS => json_encode($payload)
+    ]);
+
+    $res = curl_exec($ch);
+    curl_close($ch);
+
+    if ($res) {
+        $j = json_decode($res, true);
+        if (!empty($j['choices'][0]['message']['content'])) {
+            return $j['choices'][0]['message']['content'];
+        }
+    }
+    return null;
+}
+}
+
+// -------------------------------------------------------------
+// 2. Anthropic API Integration (Claude-3.5)
+// -------------------------------------------------------------
+if (!function_exists('call_anthropic_claude')) {
+function call_anthropic_claude(string $prompt, array $history, ?array $studentData): ?string {
+    if (!defined('LLM_API_KEY') || !LLM_API_KEY || !function_exists('curl_init')) {
+        return null;
+    }
+
+    $systemContext = "You are SURYAMITHRA GPT, an elite AI Academic Tutor & Interview Coach for university students. "
+        . "Provide clear, step-by-step explanations, working code snippets, real-world analogies, and exam/interview tips. "
+        . "Format response in markdown.";
+
+    $formattedMessages = [];
+    foreach ($history as $h) {
+        if (!empty($h['role']) && !empty($h['content'])) {
+            $formattedMessages[] = [
+                'role' => $h['role'] === 'user' ? 'user' : 'assistant',
+                'content' => (string)$h['content']
+            ];
+        }
+    }
+    if (empty($formattedMessages)) {
+        $formattedMessages[] = ['role' => 'user', 'content' => $prompt];
+    }
+
+    $payload = [
+        'model' => defined('LLM_MODEL') ? LLM_MODEL : 'claude-3-5-sonnet-20241022',
+        'max_tokens' => 1200,
+        'system' => $systemContext,
+        'messages' => $formattedMessages
     ];
 
     $ch = curl_init('https://api.anthropic.com/v1/messages');
     curl_setopt_array($ch, [
         CURLOPT_RETURNTRANSFER => true,
         CURLOPT_POST => true,
-        CURLOPT_TIMEOUT => 25,
+        CURLOPT_TIMEOUT => 30,
         CURLOPT_HTTPHEADER => [
             'Content-Type: application/json',
             'x-api-key: ' . LLM_API_KEY,
@@ -266,27 +143,297 @@ function llm_generate_tutor(string $q, string $topic, string $action, ?array $st
         ],
         CURLOPT_POSTFIELDS => json_encode($payload)
     ]);
+
     $res = curl_exec($ch);
     curl_close($ch);
 
-    $j = $res ? json_decode($res, true) : null;
-    return $j['content'][0]['text'] ?? null;
+    if ($res) {
+        $j = json_decode($res, true);
+        if (!empty($j['content'][0]['text'])) {
+            return $j['content'][0]['text'];
+        }
+    }
+    return null;
 }
 }
 
-$llmAns = llm_generate_tutor($q, $topic, $action, $studentData);
+// -------------------------------------------------------------
+// 3. Ultra-Rich GPT Knowledge Fallback Engine (Offline Mode)
+// -------------------------------------------------------------
+if (!function_exists('gpt_fallback_engine')) {
+function gpt_fallback_engine(string $prompt, string $topic, string $action, ?array $studentData): string {
+    $text = strtolower($prompt . ' ' . $topic);
+
+    // 1. Concept Explainer Mode
+    if ($action === 'explain') {
+        if (str_contains($text, 'tree') || str_contains($text, 'bst') || str_contains($text, 'binary')) {
+            return "# 🌲 Binary Search Tree (BST) — Concept & Implementation Guide
+
+## 1. What is a Binary Search Tree?
+A **Binary Search Tree (BST)** is a node-based binary tree data structure with the following properties:
+- The **left subtree** of a node contains only nodes with keys **less than** the node's key.
+- The **right subtree** of a node contains only nodes with keys **greater than** the node's key.
+- Both the left and right subtrees must also be binary search trees.
+
+---
+
+## 2. 💡 Real-World Analogy
+Imagine searching for a name in a physical **dictionary**. Instead of reading page 1 to 1000 sequentially, you open to page 500. If your target name starts with 'M' and page 500 is 'N', you immediately discard the entire right half and search the left half!
+
+---
+
+## 3. ⏱️ Time Complexity Analysis
+| Operation | Average Case | Worst Case (Unbalanced / Skewed) |
+|---|---|---|
+| **Search** | `O(log N)` | `O(N)` |
+| **Insertion** | `O(log N)` | `O(N)` |
+| **Deletion** | `O(log N)` | `O(N)` |
+
+*Note: Self-balancing trees like **AVL Trees** and **Red-Black Trees** guarantee `O(log N)` worst-case performance.*
+
+---
+
+## 4. 💻 Java Implementation
+```java
+class BSTNode {
+    int val;
+    BSTNode left, right;
+
+    public BSTNode(int item) {
+        val = item;
+        left = right = null;
+    }
+}
+
+public class BinarySearchTree {
+    BSTNode root;
+
+    // Search operation
+    public BSTNode search(BSTNode root, int key) {
+        if (root == null || root.val == key) return root;
+        if (key < root.val) return search(root.left, key);
+        return search(root.right, key);
+    }
+}
+```
+
+---
+
+## 🎯 Exam & Interview Key Takeaways
+1. **In-Order Traversal** (`Left -> Root -> Right`) of a BST always yields elements in **sorted ascending order**!
+2. To convert an unsorted array into a sorted array using BST, build the BST (`O(N log N)`) and perform In-Order Traversal.";
+        }
+
+        if (str_contains($text, 'sql') || str_contains($text, 'join') || str_contains($text, 'dbms')) {
+            return "# 🗄️ SQL Joins & Query Optimization Guide
+
+## 1. What are SQL Joins?
+A **JOIN** clause is used to combine rows from two or more tables based on a related column between them (foreign key relationship).
+
+---
+
+## 2. Types of SQL Joins
+- **`INNER JOIN`**: Returns records that have matching values in both tables.
+- **`LEFT (OUTER) JOIN`**: Returns all records from the left table, and the matched records from the right table (NULL if no match).
+- **`RIGHT (OUTER) JOIN`**: Returns all records from the right table, and the matched records from the left table.
+- **`FULL (OUTER) JOIN`**: Returns all records when there is a match in either left or right table.
+
+---
+
+## 3. SQL Code Example
+```sql
+-- Query: Fetch student name, department, and CGPA for high-performing students
+SELECT 
+    s.student_code, 
+    s.name, 
+    s.department, 
+    a.cgpa 
+FROM students s
+INNER JOIN academic_records a ON s.id = a.student_id
+WHERE a.cgpa >= 8.5
+ORDER BY a.cgpa DESC;
+```
+
+---
+
+## ⚡ Performance Tip
+Always create a **Database Index** on columns frequently used in `JOIN` conditions or `WHERE` filters (e.g. `CREATE INDEX idx_student_id ON academic_records(student_id)`). This converts scan time from `O(N * M)` nested loops to `O(N log M)` index lookups!";
+        }
+
+        if (str_contains($text, 'speed') || str_contains($text, 'distance') || str_contains($text, 'aptitude') || str_contains($text, 'time')) {
+            return "# ⏱️ Speed, Distance & Time — Quantitative Aptitude Shortcut Guide
+
+## 1. Core Formulas
+- $\text{Speed} = \frac{\text{Distance}}{\text{Time}}$
+- $\text{Distance} = \text{Speed} \times \text{Time}$
+- $\text{Time} = \frac{\text{Distance}}{\text{Speed}}$
+
+---
+
+## 2. Unit Conversions
+- To convert $\text{km/h}$ to $\text{m/s}$: Multiply by $\frac{5}{18}$
+  $$\text{Example: } 72 \text{ km/h} = 72 \times \frac{5}{18} = 20 \text{ m/s}$$
+- To convert $\text{m/s}$ to $\text{km/h}$: Multiply by $\frac{18}{5}$
+
+---
+
+## 3. Relative Speed Rules
+- Objects moving in **opposite directions**: Add speeds ($\text{Speed}_{\text{rel}} = S_1 + S_2$)
+- Objects moving in **same direction**: Subtract speeds ($\text{Speed}_{\text{rel}} = |S_1 - S_2|$)
+
+---
+
+## 💡 Train Problem Shortcuts
+- When a train crosses a **post / standing man**: Distance = Length of train ($L_t$)
+- When a train crosses a **platform / bridge / tunnel**: Distance = Length of train ($L_t$) + Length of platform ($L_p$)";
+        }
+
+        // Generic Structured Concept Explainer
+        return "# 📚 Concept Mastery: " . e($topic ?: 'Core Subject') . "
+
+## 1. Overview & Definition
+" . e($topic ?: 'This topic') . " is a core module in your academic curriculum and competitive placement readiness track.
+
+---
+
+## 2. Key Pillars & Principles
+1. **Foundational Understanding**: Master the theoretical definitions, syntax, and architectural mechanics.
+2. **Practical Application**: Write clean code / solve 3 to 5 real practice problems daily.
+3. **Optimization & Efficiency**: Analyze time complexity $O(N)$ and space constraints $O(1)$.
+
+---
+
+## 🎯 Recommended Action
+Switch to the **📝 Quiz Studio** or **⚡ Mock Interview** tabs to test your knowledge on " . e($topic ?: 'this subject') . " right now!";
+    }
+
+    // 2. Quiz Mode
+    if ($action === 'quiz') {
+        $questions = [
+            [
+                'q' => 'What is the average time complexity of searching an element in a balanced Binary Search Tree?',
+                'opts' => ['O(1)', 'O(log N)', 'O(N)', 'O(N^2)'],
+                'ans' => 1,
+                'exp' => 'In a balanced BST, each comparison reduces the search space by half, resulting in logarithmic time O(log N).'
+            ],
+            [
+                'q' => 'Which SQL clause is specifically used to filter results of aggregate functions (like COUNT, SUM, AVG)?',
+                'opts' => ['WHERE', 'HAVING', 'GROUP BY', 'ORDER BY'],
+                'ans' => 1,
+                'exp' => 'HAVING filters aggregated groups after GROUP BY, whereas WHERE filters individual rows before aggregation.'
+            ],
+            [
+                'q' => 'In Java, which keyword is used to stop a class from being inherited?',
+                'opts' => ['static', 'final', 'abstract', 'private'],
+                'ans' => 1,
+                'exp' => 'Declaring a class as `final` prevents any other class from extending it.'
+            ],
+            [
+                'q' => 'A train 150m long is running at 54 km/h. How many seconds will it take to cross a pole?',
+                'opts' => ['8 seconds', '10 seconds', '12 seconds', '15 seconds'],
+                'ans' => 1,
+                'exp' => 'Speed = 54 * (5/18) = 15 m/s. Time = Distance / Speed = 150 / 15 = 10 seconds.'
+            ],
+            [
+                'q' => 'Which data structure works on the Last-In, First-Out (LIFO) principle?',
+                'opts' => ['Queue', 'Stack', 'Array', 'Linked List'],
+                'ans' => 1,
+                'exp' => 'Stack operates on LIFO (the last inserted element is the first one removed).'
+            ]
+        ];
+        return json_encode(['topic' => $topic ?: 'Computer Science & Aptitude', 'questions' => $questions]);
+    }
+
+    // 3. Prep / Interview Mode
+    if ($action === 'prep') {
+        return <<<'EOT'
+# ⚡ AI Technical & Behavioral Placement Drill
+
+## 👨‍💻 Question 1: Technical Coding Challenge
+**Problem:** Given an integer array `nums`, return `true` if any value appears at least twice in the array, and return `false` if every element is distinct.
+
+### 💡 Optimal Approach: HashSet (O(N) Time, O(N) Space)
+```java
+import java.util.HashSet;
+
+public class Solution {
+    public boolean containsDuplicate(int[] nums) {
+        HashSet<Integer> seen = new HashSet<>();
+        for (int num : nums) {
+            if (seen.contains(num)) {
+                return true;
+            }
+            seen.add(num);
+        }
+        return false;
+    }
+}
+```
+
+---
+
+## 💬 Question 2: Behavioral / HR Interview Question
+**Question:** *"Tell me about a time you had a conflict in a team project and how you resolved it."*
+
+### 🎯 Answer Strategy (STAR Method):
+- **Situation:** "During our 3rd-year web development project, our team of 4 was split on whether to use SQL or MongoDB."
+- **Task:** "We needed to select the database framework within 24 hours to meet our sprint milestone."
+- **Action:** "I organized a quick 30-minute discussion where we listed our schema relationships (ACID transactions, relational joins). I demonstrated that SQL fit our multi-table grade management data better."
+- **Result:** "The team agreed unanimously, and we completed the project 2 days ahead of schedule with zero data inconsistency."
+EOT;
+    }
+
+    // 4. Default Interactive Chat Output
+    $topicName = e($prompt ?: $topic);
+    return <<<EOT
+# 🤖 SURYAMITHRA GPT Response
+
+Great question! Here is a step-by-step breakdown:
+
+### Key Takeaways:
+1. **Core Definition**: {$topicName} plays a vital role in both semester coursework and placement interviews.
+2. **Best Practice**: Always break problems into sub-components, write sample code/derivations, and test edge cases.
+
+```java
+// Example Code Pattern
+public class Practice {
+    public static void main(String[] args) {
+        System.out.println("Keep practicing daily!");
+    }
+}
+```
+
+Would you like me to generate a **5-question practice quiz** or a **step-by-step code example** for this topic?
+EOT;
+}
+}
+
+// -------------------------------------------------------------
+// Execution Flow: Try OpenAI -> Try Anthropic -> Fallback Engine
+// -------------------------------------------------------------
+$promptText = $q ?: $topic;
+
+$aiResponse = call_openai_gpt($promptText, $messagesHistory, $studentData, $action);
+
+if (!$aiResponse) {
+    $aiResponse = call_anthropic_claude($promptText, $messagesHistory, $studentData);
+}
+
+if (!$aiResponse) {
+    $aiResponse = gpt_fallback_engine($promptText, $topic, $action, $studentData);
+}
 
 if ($action === 'quiz') {
-    $quizRaw = generate_knowledge($topic, 'quiz', $studentData);
-    echo $quizRaw;
-    exit;
+    // If output is raw json, return directly
+    if (str_starts_with(trim($aiResponse), '{') || str_starts_with(trim($aiResponse), '[')) {
+        echo $aiResponse;
+        exit;
+    }
 }
-
-$answer = $llmAns ?: generate_knowledge($topic ?: $q, $action, $studentData);
 
 echo json_encode([
     'success' => true,
     'action' => $action,
     'topic' => $topic,
-    'answer' => $answer
+    'answer' => $aiResponse
 ]);

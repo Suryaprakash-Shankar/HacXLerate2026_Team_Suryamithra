@@ -31,10 +31,11 @@ define('FIREBASE_STORAGE_BUCKET', 'suryamithra.firebasestorage.app');
 define('FIREBASE_MESSAGING_SENDER_ID', '562733026375');
 define('FIREBASE_APP_ID', '1:562733026375:web:bbec64d6c9d6701eb87562');
 
-// Optional: paste an Anthropic API key to let the AI Copilot use an LLM.
-// Leave empty to use the built-in analytics engine (works offline).
-define('LLM_API_KEY', '');
-define('LLM_MODEL', 'claude-sonnet-4-6');
+// Optional: OpenAI API Key (e.g. gpt-4o, gpt-4o-mini) or Anthropic LLM key
+define('OPENAI_API_KEY', getenv('OPENAI_API_KEY') ?: '');
+define('OPENAI_MODEL', 'gpt-4o-mini');
+define('LLM_API_KEY', getenv('LLM_API_KEY') ?: '');
+define('LLM_MODEL', 'claude-3-5-sonnet-20241022');
 
 // Auto-detect the URL base (works for http://localhost/campusiq or any folder name)
 $__root = str_replace('\\', '/', realpath(__DIR__ . '/..'));
