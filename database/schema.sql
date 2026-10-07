@@ -220,6 +220,57 @@ CREATE TABLE IF NOT EXISTS period_attendance (
   FOREIGN KEY (staff_id) REFERENCES users(id) ON DELETE SET NULL
 );
 
+CREATE TABLE IF NOT EXISTS subjects (
+  id INT PRIMARY KEY AUTO_INCREMENT,
+  code VARCHAR(20) NOT NULL,
+  name VARCHAR(100) NOT NULL,
+  department VARCHAR(60) NOT NULL,
+  year TINYINT NOT NULL DEFAULT 1,
+  semester TINYINT NOT NULL DEFAULT 1,
+  created_by INT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY (code, department)
+);
+
+CREATE TABLE IF NOT EXISTS subject_staff_assignments (
+  id INT PRIMARY KEY AUTO_INCREMENT,
+  subject_code VARCHAR(20) NOT NULL,
+  department VARCHAR(60) NOT NULL,
+  class_name VARCHAR(30) NOT NULL DEFAULT 'Class A',
+  staff_id INT NOT NULL,
+  allocated_by INT NOT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY (subject_code, department, class_name),
+  FOREIGN KEY (staff_id) REFERENCES users(id) ON DELETE CASCADE,
+  FOREIGN KEY (allocated_by) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS daily_quizzes (
+  id INT PRIMARY KEY AUTO_INCREMENT,
+  title VARCHAR(150) NOT NULL,
+  department VARCHAR(60) NOT NULL,
+  class_name VARCHAR(30) NOT NULL DEFAULT 'Class A',
+  subject_code VARCHAR(20) NOT NULL,
+  created_by INT NOT NULL,
+  quiz_date DATE NOT NULL,
+  questions_json TEXT NOT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS quiz_results (
+  id INT PRIMARY KEY AUTO_INCREMENT,
+  quiz_id INT NOT NULL,
+  student_id INT NOT NULL,
+  score TINYINT NOT NULL DEFAULT 0,
+  total_questions TINYINT NOT NULL DEFAULT 10,
+  answers_json TEXT NULL,
+  submitted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY (quiz_id, student_id),
+  FOREIGN KEY (quiz_id) REFERENCES daily_quizzes(id) ON DELETE CASCADE,
+  FOREIGN KEY (student_id) REFERENCES students(id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS assignments (
   id INT PRIMARY KEY AUTO_INCREMENT,
   title VARCHAR(150) NOT NULL,

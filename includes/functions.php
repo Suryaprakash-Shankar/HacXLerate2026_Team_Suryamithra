@@ -968,3 +968,107 @@ function risk_pill(string $l): string {
 function seg_pill(array $s): string { return '<span class="pill ' . e($s['segment_color']) . '">' . e($s['segment']) . '</span>'; }
 function score_color(float $sc): string { return $sc >= 65 ? 'var(--green)' : ($sc >= 45 ? 'var(--amber)' : 'var(--red)'); }
 function avg(array $a): float { return $a ? array_sum($a) / count($a) : 0; }
+
+// ---------- Subject Management & Allocation by Class Tutor ----------
+function add_department_subject(string $code, string $name, string $dept, int $year = 1, int $sem = 1, ?int $createdBy = null): bool {
+    $pdo = db();
+    $code = strtoupper(trim($code));
+    $name = trim($name);
+    $dept = trim($dept);
+    if (!$code || !$name || !$dept) return false;
+    $st = $pdo->prepare('INSERT INTO subjects (code, name, department, year, semester, created_by) VALUES (?,?,?,?,?,?) ON DUPLICATE KEY UPDATE name=VALUES(name), year=VALUES(year), semester=VALUES(semester)');
+    return $st->execute([$code, $name, $dept, $year, $sem, $createdBy]);
+}
+
+function load_department_subjects(string $dept, ?int $sem = 0): array {
+    $pdo = db();
+    $sql = "SELECT s.*, u.name AS creator_name FROM subjects s LEFT JOIN users u ON u.id=s.created_by WHERE s.department=?";
+    $params = [$dept];
+    if ($sem > 0) {
+        $sql .= " AND s.semester=?";
+        $params[] = $sem;
+    }
+    $sql .= " ORDER BY s.semester, s.code";
+    $st = $pdo->prepare($sql);
+    $st->execute($params);
+    return $st->fetchAll();
+}
+
+function allocate_subject_staff(string $subCode, string $dept, string $className, int $staffId, int $allocatedBy): bool {
+    $pdo = db();
+    $st = $pdo->prepare('INSERT INTO subject_staff_assignments (subject_code, department, class_name, staff_id, allocated_by) VALUES (?,?,?,?,?) ON DUPLICATE KEY UPDATE staff_id=VALUES(staff_id), allocated_by=VALUES(allocated_by)');
+    return $st->execute([strtoupper(trim($subCode)), $dept, $className, $staffId, $allocatedBy]);
+}
+
+function load_subject_staff_allocations(string $dept, string $className = 'Class A'): array {
+    $pdo = db();
+    $st = $pdo->prepare('SELECT ssa.*, u.name AS staff_name, u.email AS staff_email, sub.name AS subject_name 
+        FROM subject_staff_assignments ssa 
+        LEFT JOIN users u ON u.id=ssa.staff_id 
+        LEFT JOIN subjects sub ON (sub.code=ssa.subject_code AND sub.department=ssa.department) 
+        WHERE ssa.department=? AND ssa.class_name=? ORDER BY ssa.subject_code');
+    $st->execute([$dept, $className]);
+    return $st->fetchAll();
+}
+
+// ---------- Daily 10 MCQ Quizzes ----------
+function create_daily_quiz(string $title, string $dept, string $className, string $subCode, int $createdBy, string $quizDate, array $questions): bool {
+    $pdo = db();
+    $st = $pdo->prepare('INSERT INTO daily_quizzes (title, department, class_name, subject_code, created_by, quiz_date, questions_json) VALUES (?,?,?,?,?,?,?)');
+    return $st->execute([trim($title), $dept, $className, strtoupper(trim($subCode)), $createdBy, $quizDate, json_encode($questions)]);
+}
+
+function load_daily_quizzes(string $dept, ?string $className = null, ?int $studentId = null): array {
+    $pdo = db();
+    $where = ["dq.department = ?"];
+    $params = [$dept];
+    if ($className) {
+        $where[] = "dq.class_name = ?";
+        $params[] = $className;
+    }
+    $sql = "SELECT dq.*, u.name AS creator_name, sub.name AS subject_name FROM daily_quizzes dq LEFT JOIN users u ON u.id=dq.created_by LEFT JOIN subjects sub ON (sub.code=dq.subject_code AND sub.department=dq.department) WHERE " . implode(" AND ", $where) . " ORDER BY dq.quiz_date DESC, dq.id DESC";
+    $st = $pdo->prepare($sql);
+    $st->execute($params);
+    $quizzes = $st->fetchAll();
+
+    if ($studentId && !empty($quizzes)) {
+        $qids = array_column($quizzes, 'id');
+        $in = implode(',', array_map('intval', $qids));
+        $resSt = $pdo->query("SELECT * FROM quiz_results WHERE student_id=" . (int)$studentId . " AND quiz_id IN ($in)");
+        $resMap = [];
+        foreach ($resSt->fetchAll() as $r) {
+            $resMap[$r['quiz_id']] = $r;
+        }
+        foreach ($quizzes as &$q) {
+            $q['my_result'] = $resMap[$q['id']] ?? null;
+        }
+        unset($q);
+    }
+    return $quizzes;
+}
+
+function submit_quiz_result(int $quizId, int $studentId, array $answers): int {
+    $pdo = db();
+    $st = $pdo->prepare('SELECT * FROM daily_quizzes WHERE id=?');
+    $st->execute([$quizId]);
+    $quiz = $st->fetch();
+    if (!$quiz) return 0;
+
+    $questions = json_decode($quiz['questions_json'], true) ?: [];
+    $score = 0;
+    foreach ($questions as $idx => $qObj) {
+        $chosen = (int)($answers[$idx] ?? -1);
+        if ($chosen === (int)($qObj['ans'] ?? 0)) {
+            $score++;
+        }
+    }
+
+    $stRes = $pdo->prepare('INSERT INTO quiz_results (quiz_id, student_id, score, total_questions, answers_json) VALUES (?,?,?,?,?) ON DUPLICATE KEY UPDATE score=VALUES(score), answers_json=VALUES(answers_json), submitted_at=CURRENT_TIMESTAMP');
+    $stRes->execute([$quizId, $studentId, $score, count($questions), json_encode($answers)]);
+
+    // Update LMS assignment completion score for student
+    $avgQuizScore = (float)$pdo->query("SELECT AVG(score / total_questions * 100) FROM quiz_results WHERE student_id=" . (int)$studentId)->fetchColumn();
+    $pdo->prepare("UPDATE lms_activity SET assignment_completion=? WHERE student_id=?")->execute([round($avgQuizScore, 1), $studentId]);
+
+    return $score;
+}
