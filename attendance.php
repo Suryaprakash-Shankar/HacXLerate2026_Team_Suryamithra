@@ -5,12 +5,45 @@ require_once __DIR__ . '/includes/functions.php';
 $u = require_role(['admin', 'hod', 'faculty']);
 
 $departments = load_departments();
-$dept = trim($_GET['dept'] ?? ($u['department'] ?: 'CSE'));
-$className = trim($_GET['class_name'] ?? 'Class A');
-$year = (int)($_GET['year'] ?? 0);
-$sem = (int)($_GET['sem'] ?? 0);
-$date = trim($_GET['date'] ?? date('Y-m-d'));
+$dept = trim($_GET['dept'] ?? $_POST['department'] ?? ($u['department'] ?: 'CSE'));
+$className = trim($_GET['class_name'] ?? $_POST['class_name'] ?? 'Class A');
+$year = (int)($_GET['year'] ?? $_POST['year'] ?? 0);
+$sem = (int)($_GET['sem'] ?? $_POST['sem'] ?? 0);
+$date = trim($_GET['date'] ?? $_POST['date'] ?? date('Y-m-d'));
 $mode = trim($_GET['mode'] ?? 'tutor');
+
+$classAssignments = load_class_assignments($dept);
+
+// Find assigned tutor for current section
+$assignedTutorName = 'Unassigned';
+$assignedTutorId = 0;
+foreach ($classAssignments as $ca) {
+    if ($ca['class_name'] === $className) {
+        $assignedTutorName = $ca['teacher_name'] ?: 'Unassigned';
+        $assignedTutorId = (int)($ca['teacher_id'] ?? 0);
+        break;
+    }
+}
+
+// Check if current user is the assigned Class Tutor for this section (or Admin/HOD)
+$isAssignedClassTutor = false;
+if (in_array($u['role'], ['admin', 'hod'], true)) {
+    $isAssignedClassTutor = true;
+} elseif ($u['role'] === 'faculty') {
+    if ($assignedTutorId > 0 && (int)$u['id'] === $assignedTutorId) {
+        $isAssignedClassTutor = true;
+    } else {
+        $chkCount = (int)db()->query("SELECT COUNT(*) FROM students WHERE department=" . db()->quote($dept) . " AND class_name=" . db()->quote($className) . " AND teacher_id=" . (int)$u['id'])->fetchColumn();
+        if ($chkCount > 0) {
+            $isAssignedClassTutor = true;
+        }
+    }
+}
+
+// If user is not the assigned Class Tutor for this section, force subject mode
+if ($mode === 'tutor' && !$isAssignedClassTutor) {
+    $mode = 'subject';
+}
 
 // Handle Form Submissions
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -19,6 +52,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     // Class Tutor / Admin / HOD saves full 7-Period Matrix
     if ($action === 'save_matrix') {
+        if (!$isAssignedClassTutor) {
+            flash("Access Denied: Only the assigned Class Tutor ($assignedTutorName) or HOD/Admin can modify the 7-Period Attendance Sheet.", 'danger');
+            redirect("attendance.php?dept=" . urlencode($dept) . "&class_name=" . urlencode($className) . "&date=" . urlencode($date) . "&year=$year&sem=$sem&mode=subject");
+        }
         $postDept = trim($_POST['department'] ?? $dept);
         $postClass = trim($_POST['class_name'] ?? $className);
         $postDate = trim($_POST['date'] ?? $date);
@@ -59,6 +96,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     // Quick Action: Class Tutor converts student's Period Absent to OD
     if ($action === 'approve_od') {
+        if (!$isAssignedClassTutor) {
+            flash("Access Denied: Only the assigned Class Tutor ($assignedTutorName) or HOD/Admin can approve ODs.", 'danger');
+            redirect("attendance.php?dept=" . urlencode($dept) . "&class_name=" . urlencode($className) . "&date=" . urlencode($date) . "&year=$year&sem=$sem&mode=subject");
+        }
         $sid = (int)($_POST['student_id'] ?? 0);
         $pNum = (int)($_POST['period_number'] ?? 1);
         $subCode = trim($_POST['subject_code'] ?? 'GEN');
@@ -94,17 +135,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
 // Load students using 1-click Year & Semester filter
 $students = load_class_period_matrix($dept, $className, $date, $year, $sem);
-$classAssignments = load_class_assignments($dept);
 $assignmentsList = load_assignments($dept, $year, $sem);
-
-// Find assigned tutor for current section
-$assignedTutorName = 'Unassigned';
-foreach ($classAssignments as $ca) {
-    if ($ca['class_name'] === $className) {
-        $assignedTutorName = $ca['teacher_name'] ?: 'Unassigned';
-        break;
-    }
-}
 
 include __DIR__ . '/includes/header.php';
 ?>
@@ -168,10 +199,16 @@ include __DIR__ . '/includes/header.php';
 </div>
 
 <!-- Tab Navigation Bar -->
-<div style="display:flex; gap:10px; margin-bottom:20px;">
-  <a href="attendance.php?dept=<?= urlencode($dept) ?>&class_name=<?= urlencode($className) ?>&year=<?= $year ?>&sem=<?= $sem ?>&date=<?= urlencode($date) ?>&mode=tutor" class="btn <?= $mode === 'tutor' ? 'primary' : 'secondary' ?>">
-    Class Tutor 7-Period Sheet & OD
-  </a>
+<div style="display:flex; gap:10px; margin-bottom:20px; align-items:center; flex-wrap:wrap;">
+  <?php if ($isAssignedClassTutor): ?>
+    <a href="attendance.php?dept=<?= urlencode($dept) ?>&class_name=<?= urlencode($className) ?>&year=<?= $year ?>&sem=<?= $sem ?>&date=<?= urlencode($date) ?>&mode=tutor" class="btn <?= $mode === 'tutor' ? 'primary' : 'secondary' ?>">
+      Class Tutor 7-Period Sheet & OD
+    </a>
+  <?php else: ?>
+    <button type="button" class="btn secondary" disabled style="opacity:0.65; cursor:not-allowed; background:#f1f5f9; color:#64748b; border:1px solid #cbd5e1;" title="Only the assigned Class Tutor (<?= e($assignedTutorName) ?>) can view/edit 7-Period Sheet">
+      🔒 Class Tutor 7-Period Sheet & OD (Class Tutor Only)
+    </button>
+  <?php endif; ?>
   <a href="attendance.php?dept=<?= urlencode($dept) ?>&class_name=<?= urlencode($className) ?>&year=<?= $year ?>&sem=<?= $sem ?>&date=<?= urlencode($date) ?>&mode=subject" class="btn <?= $mode === 'subject' ? 'primary' : 'secondary' ?>">
     Subject Faculty 1-Click Upload
   </a>
@@ -179,6 +216,15 @@ include __DIR__ . '/includes/header.php';
     Assignments Manager
   </a>
 </div>
+
+<?php if (!$isAssignedClassTutor): ?>
+  <div style="background:#eff6ff; border:1px solid #bfdbfe; color:#1e40af; padding:12px 16px; border-radius:10px; margin-bottom:20px; font-size:13px; display:flex; align-items:center; gap:10px;">
+    <span style="font-size:16px;">ℹ️</span>
+    <div>
+      <strong>Subject Staff Access Mode:</strong> You are viewing <b><?= e($dept) ?> - <?= e($className) ?></b> (Assigned Class Tutor: <b><?= e($assignedTutorName) ?></b>). As subject faculty, you can update attendance for your period below. The 7-Period sheet & OD approvals are managed by the assigned Class Tutor.
+    </div>
+  </div>
+<?php endif; ?>
 
 <!-- Info Cards & OD Policy Overview -->
 <div class="grid g4" style="margin-bottom: 20px;">
