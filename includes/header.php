@@ -18,7 +18,6 @@ $nav = [
   ['quizzes.php', 'Daily 10 MCQ Quizzes', 'spark', ['admin', 'hod', 'faculty', 'student']],
   ['placement/jobs.php', 'Jobs & placement', 'briefcase', ['admin', 'placement', 'student']],
   ['ai_tutor.php', 'AI Student Tutor', 'spark', ['admin', 'hod', 'faculty', 'placement', 'student']],
-  ['copilot.php', 'AI Copilot', 'spark', ['admin', 'hod', 'faculty', 'placement']],
   ['notifications.php', 'Notifications', 'bell', ['admin', 'hod', 'faculty', 'placement', 'student']],
   ['profile.php', 'My Account', 'user', ['admin', 'hod', 'faculty', 'placement', 'student']],
   ['admin/import.php', 'Import data', 'upload', ['admin']],
